@@ -2,6 +2,7 @@ use std::path::Path;
 
 use chrono::prelude::*;
 
+use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -108,9 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let p = Path::new("/Users/milad/code/harmonic/test");
 
     tokio::spawn(async move {
-        if let Err(e) = watcher::async_watch(p).await {
-            eprintln!("error: {:?}", e)
+        let (_watcher, mut rx) = watcher::async_watch(p).await.unwrap();
+
+        while let Some(Ok(event)) = rx.next().await {
+            println!("event: {:?}, kind: {:?}", event.kind, event.paths)
         }
+
     });
 
     Server::builder()

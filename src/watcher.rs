@@ -1,6 +1,5 @@
 use futures::{
     channel::mpsc::{unbounded, UnboundedReceiver},
-    StreamExt, Stream,
 };
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::Path;
@@ -20,19 +19,12 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, UnboundedReceiver<noti
     Ok((watcher, rx))
 }
 
-pub async fn async_watch<P: AsRef<Path>>(path: P) -> notify::Result<()> {
-    let (mut watcher, mut rx) = async_watcher()?;
+pub async fn async_watch<P: AsRef<Path>>(path: P) -> notify::Result<(RecommendedWatcher, UnboundedReceiver<notify::Result<Event>>)> {
+    let (mut watcher, rx) = async_watcher()?;
 
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
     watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
 
-    while let Some(res) = rx.next().await {
-        match res {
-            Ok(event) => println!("changed: {:?}", event),
-            Err(e) => println!("watch error: {:?}", e),
-        }
-    }
-
-    Ok(())
+    Ok((watcher, rx))
 }
