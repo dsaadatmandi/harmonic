@@ -50,5 +50,10 @@ jobs:
     - name: Build (cross)
       if: matrix.target == 'aarch64-unknown-linux-gnu'
       run: cross build --release --target ${{ matrix.target }}
-        
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: harmonic-${{ matrix.target }}
+        path: target/${{ matrix.target }}/release/harmonic.*
+            
 
