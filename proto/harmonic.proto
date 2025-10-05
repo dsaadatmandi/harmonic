@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package harmonic;
+
+service Harmonic {
+  rpc HarmonizeStatus (StatusRequest) returns (StatusResponse);
+  rpc HarmonizeUpdate (HarmonizePush) returns (HarmonizePushResponse);
+  rpc HarmonizeClientStreamUpdate (stream HarmonizePush) returns (HarmonizePushResponse);
+  rpc HarmonizeServerStreamUpdate (HarmonizePushRequest) returns (stream HarmonizePush);
+}
+
+enum FileType {
+  OTHER = 0;
+  MARKDOWN = 1;
+  PDF = 2;
+}
+
+enum UpdateStrategy {
+  SKIP = 0;
+  CLIENT_PULL = 1;
+  CLIENT_PUSH = 2;
+}
+
+message StatusRequest {
+  int64 timestamp_micro = 1;
+  FileType file_type = 2;
+  string hash = 3;
+}
+
+message StatusResponse {
+  int64 timestamp_micro = 1;
+  UpdateStrategy strategy = 2;
+}
+
+message HarmonizePush {
+  string input = 1;
+}
+
+message HarmonizePushResponse {
+  string output = 1;
+}
+
+message HarmonizePushRequest {
+  string request = 1;
+}
