@@ -3,6 +3,7 @@ syntax = "proto3";
 package harmonic;
 
 service Harmonic {
+  rpc HarmonizeHealth (HealthStatusMessage) returns (HealthStatusMessage);
   rpc HarmonizeStatus (StatusRequest) returns (StatusResponse);
   rpc HarmonizeUpdate (HarmonizePush) returns (HarmonizePushResponse);
   rpc HarmonizeClientStreamUpdate (stream HarmonizePush) returns (HarmonizePushResponse);
@@ -19,6 +20,11 @@ enum UpdateStrategy {
   SKIP = 0;
   CLIENT_PULL = 1;
   CLIENT_PUSH = 2;
+}
+
+enum HealthStatus {
+  OK = 0;
+  PROBLEM = 1;
 }
 
 message StatusRequest {
@@ -42,4 +48,9 @@ message HarmonizePushResponse {
 
 message HarmonizePushRequest {
   string request = 1;
+}
+
+message HealthStatusMessage {
+  int64 timestamp_micro = 1;
+  HealthStatus status = 2;
 }

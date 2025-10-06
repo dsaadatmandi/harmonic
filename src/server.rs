@@ -3,18 +3,19 @@ use std::path::Path;
 use chrono::prelude::*;
 
 use futures::StreamExt;
+use notify::event::{CreateKind, ModifyKind, RemoveKind};
+use notify::{EventKind};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use harmonic::harmonic_server::{Harmonic, HarmonicServer};
 use harmonic::{
-    HarmonizePush, HarmonizePushResponse, StatusRequest, StatusResponse, UpdateStrategy,
+    HarmonizePush, HarmonizePushResponse, StatusRequest, StatusResponse, UpdateStrategy, HarmonizePushRequest, HealthStatus, HealthStatusMessage
 };
-use tonic::{Request, Response, Status, Streaming, transport::Server};
-
-use crate::harmonic::HarmonizePushRequest;
+use tonic::{Request, Response, Streaming, Status, transport::Server};
 
 mod watcher;
+// mod common;
 
 pub mod harmonic {
     tonic::include_proto!("harmonic");
@@ -26,6 +27,22 @@ pub struct HarmonicService {}
 #[tonic::async_trait]
 impl Harmonic for HarmonicService {
     type HarmonizeServerStreamUpdateStream = ReceiverStream<Result<HarmonizePush, Status>>;
+
+    async fn harmonize_health(
+        &self,
+        request: Request<HealthStatusMessage>,
+    ) -> Result<Response<HealthStatusMessage>, Status> {
+        println!("Got a request: {:?}", request);
+
+        let now = Utc::now().timestamp_micros();
+
+        let reply = HealthStatusMessage {
+            timestamp_micro: now,
+            status: HealthStatus::Ok.into(),
+        };
+
+        Ok(Response::new(reply))
+    }
 
     async fn harmonize_status(
         &self,
@@ -112,7 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (_watcher, mut rx) = watcher::async_watch(p).await.unwrap();
 
         while let Some(Ok(event)) = rx.next().await {
-            println!("event: {:?}, kind: {:?}", event.kind, event.paths)
+            match event.kind {
+                EventKind::Modify(_) => println!("Modification event to {:?}", event.paths),
+                EventKind::Remove(_) => println!("Remove event to {:?}", event.paths),
+                EventKind::Create(_) => println!("Create event to {:?}", event.paths),
+                _ => println!("Unmatched event of type {:?} to {:?}", event.kind, event.paths),
+            }
         }
 
     });
