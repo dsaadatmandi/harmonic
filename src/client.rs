@@ -3,15 +3,31 @@ use harmonic::harmonic_client::HarmonicClient;
 use harmonic::{HarmonizePushRequest};
 use tokio_stream::StreamExt;
 
+pub mod common;
+
 
 pub mod harmonic {
     tonic::include_proto!("harmonic");
 }
 
 
+fn main() {
+
+    let config= common::load_config();
+
+    // load last SyncState from disk
+    // generate new SyncState 
+    // compare -> build into sync state struct
+    // for files which are different -> send hash and modified ts
+
+    let state = common::generate_sync_state_for_all_files(config.sync_path);
+
+
+}
+
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn send_state_to_client() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = HarmonicClient::connect("http://[::1]:42069").await?;
 
     let request = tonic::Request::new(HarmonizePushRequest {
