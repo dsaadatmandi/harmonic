@@ -1,5 +1,5 @@
 use chrono::prelude::Utc;
-use std::{fs::{self}, path:: PathBuf, time::UNIX_EPOCH};
+use std::{collections::BTreeMap, fs::{self}, path::{Path,  PathBuf}, time::UNIX_EPOCH};
 use serde::{Serialize, Deserialize};
 use serde;
 use walkdir::WalkDir;
@@ -30,18 +30,18 @@ pub struct Config {
 #[derive(Serialize, Deserialize)]
 pub struct SyncState {
     last_sync_timestamp_micros: i64,
-    tree: Vec<PathHash>,
+    tree: BTreeMap<PathBuf, FileMetadata>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct PathHash {
-    path: PathBuf,
+struct FileMetadata {
     hash: [u8; 16],
     modified_ts: i64,
 }
 
-impl PathHash {
-    fn new(path: PathBuf) -> PathHash {
+impl FileMetadata {
+    fn new<P: AsRef<Path>>(path: P) -> FileMetadata {
+        let path = path.as_ref();
         let file = fs::read(&path)
         .expect("Failed to open file.");
         let hash: [u8; 16] = md5::compute(&file).into();
@@ -55,7 +55,7 @@ impl PathHash {
         .expect("Time went backwards")
         .as_micros() as i64;
 
-        Self {path, hash, modified_ts}
+        Self {hash, modified_ts}
     }
 }
 
@@ -76,35 +76,51 @@ fn config_file_path() -> PathBuf {
 }
 
 fn save_config(config: Config) {
-    let serial_toml = toml::to_string(&config)
+    let config_toml = toml::to_string(&config)
     .expect("Unable to serialize config struct to toml format.");
 
-    fs::write(config_file_path(), serial_toml)
+    fs::write(config_file_path(), config_toml)
     .expect("Unable to write serialized config struct to file.");
 }
 
 pub fn load_config() -> Config {
-    let content = fs::read_to_string(config_file_path())
+    let config_toml = fs::read_to_string(config_file_path())
     .expect("Unable to read file");
 
-    toml::from_str(&content)
+    toml::from_str(&config_toml)
     .expect("Unable to parse string to toml")
 
 }
 
-pub fn generate_sync_state_for_all_files(root_path: PathBuf) -> SyncState {
+pub fn save_state(state: SyncState, config: &Config) {
+    let state_json = serde_json::to_string(&state)
+    .expect("Unable to serialise state to json format.");
 
-    let mut ph_vec: Vec<PathHash> = Vec::new();
+    fs::write(&config.sync_path, state_json)
+    .expect("Unable to write serialized Sync State struct to file.");
+}
+
+pub fn load_state(config: &Config) -> SyncState {
+    let state_json = fs::read_to_string(&config.sync_path)
+    .expect("Unable to read file");
+
+    serde_json::from_str(&state_json)
+    .expect("Unable to parse string to toml")
+}
+
+pub fn generate_state(root_path: PathBuf) -> SyncState {
+
+    let mut file_tree: BTreeMap<PathBuf, FileMetadata> = BTreeMap::new();
 
     // TODO: log
     for file in WalkDir::new(root_path)
     .into_iter()
     .filter_map(|e| e.ok())
     .filter(|e| e.metadata().unwrap().is_file()) {
-        let ph = PathHash::new(file.into_path());
-        ph_vec.push(ph);
+        let metadata = FileMetadata::new(file.path());
+        file_tree.insert(file.into_path(), metadata);
     }
 
-    SyncState { last_sync_timestamp_micros: Utc::now().timestamp_micros(), tree: ph_vec }
+    SyncState { last_sync_timestamp_micros: Utc::now().timestamp_micros(), tree: file_tree }
 
 }

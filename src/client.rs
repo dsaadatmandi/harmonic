@@ -15,14 +15,16 @@ fn main() {
 
     let config= common::load_config();
 
-    // load last SyncState from disk
-    // generate new SyncState 
+    let last_state = common::load_state(&config);
+
+    // load last SyncState from disk ✅
+    // generate new SyncState ✅
     // compare -> build into sync state struct
     // for files which are different -> send hash and modified ts
 
-    let state = common::generate_sync_state_for_all_files(config.sync_path);
+    let now_state = common::generate_state(config.sync_path);
 
-
+    
 }
 
 
