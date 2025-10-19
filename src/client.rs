@@ -19,12 +19,15 @@ fn main() {
 
     // load last SyncState from disk ✅
     // generate new SyncState ✅
-    // compare -> build into sync state struct
+    // compare -> build into sync state struct ✅
     // for files which are different -> send hash and modified ts
 
     let now_state = common::generate_state(config.sync_path);
 
+    let diffs = common::compare_states(last_state, now_state);
+
     
+
 }
 
 

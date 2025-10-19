@@ -1,8 +1,9 @@
 use chrono::prelude::Utc;
-use std::{collections::BTreeMap, fs::{self}, path::{Path,  PathBuf}, time::UNIX_EPOCH};
+use std::{collections::{BTreeMap, BTreeSet}, fs::{self}, path::{Path,  PathBuf}, time::UNIX_EPOCH};
 use serde::{Serialize, Deserialize};
 use serde;
 use walkdir::WalkDir;
+use log::{info};
 
 
 // pub struct HealthStatus {
@@ -37,6 +38,17 @@ pub struct SyncState {
 struct FileMetadata {
     hash: [u8; 16],
     modified_ts: i64,
+}
+
+pub struct Diff {
+    path: PathBuf,
+    change: ChangeType,
+}
+
+pub enum ChangeType {
+    Added,
+    Removed,
+    Modified,
 }
 
 impl FileMetadata {
@@ -123,4 +135,29 @@ pub fn generate_state(root_path: PathBuf) -> SyncState {
 
     SyncState { last_sync_timestamp_micros: Utc::now().timestamp_micros(), tree: file_tree }
 
+}
+
+pub fn compare_states(last_state: SyncState, now_state: SyncState) -> Vec<Diff> {
+    info!("Computing difference between current state with previous sync state");
+
+    let mut diffs = Vec::new();
+
+    let all_paths: BTreeSet<&PathBuf> = last_state.tree.keys().chain(now_state.tree.keys()).collect();
+
+    for path in all_paths {
+        let before = last_state.tree.get(path);
+        let now = now_state.tree.get(path);
+
+        match (now, before) {
+            (Some(now_meta), Some(before_meta)) if now_meta.hash != before_meta.hash 
+            => {diffs.push(Diff{path: path.to_owned(), change: ChangeType::Modified})}
+            (Some(_), None) => {diffs.push(Diff{path: path.to_owned(), change: ChangeType::Added})}
+            (None, Some(_)) => {diffs.push(Diff{path:path.to_owned(), change: ChangeType::Removed})}
+            (Some(_), Some(_)) => {}
+            (None, None) => unreachable!()
+        }
+    };
+
+    diffs
+    
 }
