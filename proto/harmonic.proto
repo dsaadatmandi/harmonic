@@ -3,11 +3,8 @@ syntax = "proto3";
 package harmonic;
 
 service Harmonic {
-  rpc HarmonizeHealth (HealthStatusMessage) returns (HealthStatusMessage);
-  rpc HarmonizeStatus (StatusRequest) returns (StatusResponse);
-  rpc HarmonizeUpdate (HarmonizePush) returns (HarmonizePushResponse);
-  rpc HarmonizeClientStreamUpdate (stream HarmonizePush) returns (HarmonizePushResponse);
-  rpc HarmonizeServerStreamUpdate (HarmonizePushRequest) returns (stream HarmonizePush);
+  rpc HarmonizeClientInitiateSync (ClientSyncState) returns (ServerSyncStateResponse);
+  rpc HarmonizeSynchronizeDate (stream FileSync) returns (stream FileSync);
 }
 
 enum FileType {
@@ -18,19 +15,32 @@ enum FileType {
 
 enum UpdateStrategy {
   SKIP = 0;
-  CLIENT_PULL = 1;
-  CLIENT_PUSH = 2;
+  SERVER_SEND = 1;
+  CLIENT_SEND = 2;
 }
 
-enum HealthStatus {
-  OK = 0;
-  PROBLEM = 1;
+message ClientSyncState {
+  string sync_uuid = 1;
+  int64 timestamp_last_sync_micro = 2;
+  repeated FileStatus status_list = 3;
 }
 
-message StatusRequest {
-  int64 timestamp_micro = 1;
-  FileType file_type = 2;
-  string hash = 3;
+message FileStatus {
+  string path = 1;
+  int64 timestamp_micro = 2;
+  FileType file_type = 3;
+  bytes hash = 4;
+}
+
+message ServerSyncStateResponse {
+  string sync_uuid = 1;
+  int64 timestamp_micro = 2;
+  repeated StrategyPerFile strategy = 3;
+}
+
+message StrategyPerFile {
+  string path = 1;
+  UpdateStrategy strategy = 2;
 }
 
 message StatusResponse {
@@ -38,19 +48,10 @@ message StatusResponse {
   UpdateStrategy strategy = 2;
 }
 
-message HarmonizePush {
-  string input = 1;
-}
-
-message HarmonizePushResponse {
-  string output = 1;
-}
-
-message HarmonizePushRequest {
-  string request = 1;
-}
-
-message HealthStatusMessage {
-  int64 timestamp_micro = 1;
-  HealthStatus status = 2;
+message FileSync {
+  string sync_uuid = 1;
+  string path = 2;
+  bytes chunk = 3;
+  int64 offset = 4;
+  bool is_final = 5;
 }
