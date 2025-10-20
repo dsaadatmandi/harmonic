@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use harmonic::ClientSyncState;
 use harmonic::harmonic_client::HarmonicClient;
 use log::info;
@@ -5,7 +7,7 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::common::ChangeType;
-use crate::harmonic::ServerSyncStateResponse;
+use crate::harmonic::{ServerSyncStateResponse, UpdateStrategy};
 
 pub mod common;
 
@@ -23,11 +25,6 @@ async fn main() {
 
     let last_state = common::load_state(&config);
 
-    // load last SyncState from disk ✅
-    // generate new SyncState ✅
-    // compare -> build into sync state struct ✅
-    // for files which are different -> send hash and modified ts
-
     let now_state = common::generate_state(config.sync_path);
 
     let diffs = common::compare_states(&last_state, &now_state);
@@ -40,6 +37,10 @@ async fn main() {
     let response = send_state_to_server(&sync_uuid, last_state.last_sync_timestamp_micros, diffs)
         .await
         .expect("Error awaiting response from server to sync intiation.");
+
+    let to_send = handle_response(response);
+
+
 }
 
 async fn send_state_to_server(
@@ -71,4 +72,19 @@ async fn send_state_to_server(
     //         }
     //     }
     // }
+}
+
+fn handle_response(response: ServerSyncStateResponse) -> Vec<PathBuf> {
+    info!("Handling server response after initial request");
+
+    response
+        .strategy
+        .into_iter()
+        .filter_map(
+            |strat| match UpdateStrategy::try_from(strat.strategy).ok()? {
+                UpdateStrategy::ClientSend => Some(PathBuf::from(strat.path)),
+                _ => None,
+            },
+        )
+        .collect()
 }
