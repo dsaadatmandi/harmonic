@@ -129,7 +129,7 @@ pub fn load_state(config: &Config) -> SyncState {
     serde_json::from_str(&state_json).expect("Unable to parse string to toml")
 }
 
-pub fn generate_state(root_path: PathBuf) -> SyncState {
+pub fn generate_state(root_path: &PathBuf) -> SyncState {
     let mut file_tree: BTreeMap<PathBuf, FileMetadata> = BTreeMap::new();
 
     // TODO: log
