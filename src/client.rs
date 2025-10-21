@@ -1,11 +1,13 @@
 use std::error::Error;
 use std::path::PathBuf;
 
+use futures::pin_mut;
 use harmonic::ClientSyncState;
 use harmonic::harmonic_client::HarmonicClient;
 use log::{error, info};
-use tokio::io::AsyncReadExt;
-use tokio_stream::{StreamExt, Stream};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Channel;
 use uuid::Uuid;
 
@@ -25,7 +27,9 @@ const ROOT_PATH: &str = "/opt/sync";
 async fn main() {
     let sync_uuid = Uuid::new_v4();
     let config = common::load_config();
-    let mut client = HarmonicClient::connect(ADDR).await.expect("Error in awaiting client creation.");
+    let mut client = HarmonicClient::connect(ADDR)
+        .await
+        .expect("Error in awaiting client creation.");
     let last_state = common::load_state(&config);
     let now_state = common::generate_state(&config.sync_path);
     let diffs = common::compare_states(&last_state, &now_state);
@@ -35,18 +39,24 @@ async fn main() {
         ()
     }
 
-    let response = send_state_to_server(&sync_uuid, last_state.last_sync_timestamp_micros, diffs, client.clone())
-        .await
-        .expect("Error awaiting response from server to sync intiation.");
+    let response = send_state_to_server(
+        &sync_uuid,
+        last_state.last_sync_timestamp_micros,
+        diffs,
+        client.clone(),
+    )
+    .await
+    .expect("Error awaiting response from server to sync intiation.");
 
     let files_to_send = handle_response(response);
 
     let result = send_data_to_server(client.clone(), files_to_send).await;
-        match result {
-            Ok(()) => info!("Completed Sync"),
-            Err(e) => error!("Sync failed"),
-        };
+    match result {
+        Ok(()) => info!("Completed Sync"),
+        Err(e) => error!("Sync failed due to: {:?}", e),
+    };
 
+    common::save_state(now_state, &config);
 }
 
 async fn send_state_to_server(
@@ -55,7 +65,6 @@ async fn send_state_to_server(
     diffs: Vec<common::Diff>,
     mut client: HarmonicClient<Channel>,
 ) -> Result<ServerSyncStateResponse, Box<dyn Error>> {
-
     let request = tonic::Request::new(ClientSyncState {
         sync_uuid: sync_uuid.to_string(),
         timestamp_last_sync_micro: last_sync_timestamp,
@@ -68,16 +77,6 @@ async fn send_state_to_server(
         .into_inner();
 
     Ok(response)
-    // while let Some(r) = response.next().await {
-    //     match r {
-    //         Ok(reply) => {
-    //             println!("received: {:?}", reply)
-    //         }
-    //         Err(e) => {
-    //             println!("{:?}", e)
-    //         }
-    //     }
-    // }
 }
 
 fn handle_response(response: ServerSyncStateResponse) -> Vec<PathBuf> {
@@ -95,40 +94,73 @@ fn handle_response(response: ServerSyncStateResponse) -> Vec<PathBuf> {
         .collect()
 }
 
-async fn send_data_to_server(mut client: HarmonicClient<Channel>, files: Vec<PathBuf>) -> Result<(), Box<dyn Error>> {
-
+async fn send_data_to_server(
+    mut client: HarmonicClient<Channel>,
+    files: Vec<PathBuf>,
+) -> Result<(), Box<dyn Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let out = tokio_stream::wrappers::ReceiverStream::new(rx);
     let mut inc = client
-    .harmonize_synchronize_date(tonic::Request::new(out))
-    .await?
-    .into_inner();
+        .harmonize_synchronize_date(tonic::Request::new(out))
+        .await?
+        .into_inner();
 
-    tokio::spawn(async move {
+    let send_task = tokio::spawn(async move {
         for f in files {
-            let message = file_to_chunks(f);
-        };
+            let stream = file_to_chunked_file_sync(&f);
+            pin_mut!(stream);
+            while let Some(file_sync) = stream.next().await {
+                let response = tx.send(file_sync.clone()).await;
+                match response {
+                    Err(e) => {
+                        error!(
+                            "There was an error with send data for file {}: {:?}",
+                            file_sync.path, e
+                        );
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
         }
-    );
-    
+        drop(tx);
+    });
 
+    let mut cur_file = String::new();
+    let mut file_currently_writing: Option<File> = None;
     while let Some(response) = inc.next().await {
         match response {
             Ok(msg) => {
-                info!("Received data from server: {:?}", msg)
+                let path = msg.path.as_str();
+                info!("Received data from server for file {}", path);
+                if cur_file != path {
+                    file_currently_writing = Some(
+                        tokio::fs::File::create(path)
+                            .await
+                            .expect("Unable to create file to write data to"),
+                    );
+                    cur_file = path.to_string();
+                }
+
+                if let Some(f) = file_currently_writing.as_mut() {
+                    f.write_all(&msg.chunk)
+                        .await
+                        .expect("Unable to write data to file")
+                }
             }
             Err(e) => {
-                error!("Error in response stream from server");
+                error!("Error in response stream from server: {:?}", e);
                 break;
             }
         }
     }
 
-    Ok(())
+    send_task.await?;
 
+    Ok(())
 }
 
-fn file_to_chunks(path: PathBuf) -> impl Stream<Item = FileSync> {
+fn file_to_chunked_file_sync(path: &PathBuf) -> impl Stream<Item = FileSync> {
     async_stream::stream! {
         let mut file = tokio::fs::File::open(&path).await.unwrap();
         let mut buffer = vec![0u8; 8192];
