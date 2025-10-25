@@ -4,7 +4,7 @@ package harmonic;
 
 service Harmonic {
   rpc HarmonizeClientInitiateSync (ClientSyncState) returns (ServerSyncStateResponse);
-  rpc HarmonizeSynchronizeDate (stream FileSync) returns (stream FileSync);
+  rpc HarmonizeSynchronizeState (stream FileSync) returns (stream FileSync);
 }
 
 enum FileType {
@@ -52,6 +52,7 @@ message FileSync {
   string sync_uuid = 1;
   string path = 2;
   bytes chunk = 3;
-  int64 offset = 4;
+  uint64 offset = 4;
   bool is_final = 5;
+  uint64 file_size = 6;
 }

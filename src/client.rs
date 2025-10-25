@@ -34,9 +34,9 @@ async fn main() {
     let now_state = common::generate_state(&config.sync_path);
     let diffs = common::compare_states(&last_state, &now_state);
 
-    if diffs.len() == 0 {
+    if diffs.is_empty() {
         info!("No updates to push");
-        ()
+        return
     }
 
     let response = send_state_to_server(
@@ -101,7 +101,7 @@ async fn send_data_to_server(
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let out = tokio_stream::wrappers::ReceiverStream::new(rx);
     let mut inc = client
-        .harmonize_synchronize_date(tonic::Request::new(out))
+        .harmonize_synchronize_state(tonic::Request::new(out))
         .await?
         .into_inner();
 
@@ -126,27 +126,21 @@ async fn send_data_to_server(
         drop(tx);
     });
 
-    let mut cur_file = String::new();
+    let mut cur_file: String = Default::default();
     let mut file_currently_writing: Option<File> = None;
     while let Some(response) = inc.next().await {
         match response {
             Ok(msg) => {
-                let path = msg.path.as_str();
-                info!("Received data from server for file {}", path);
-                if cur_file != path {
-                    file_currently_writing = Some(
-                        tokio::fs::File::create(path)
-                            .await
-                            .expect("Unable to create file to write data to"),
-                    );
-                    cur_file = path.to_string();
+                let path = msg.path.clone();
+                info!("Received data for file {}. Writing to path...", path);
+
+                if file_currently_writing.is_none() || cur_file != path {
+                    file_currently_writing = Some(common::get_file(&msg).await);
+                    cur_file = path;
                 }
 
-                if let Some(f) = file_currently_writing.as_mut() {
-                    f.write_all(&msg.chunk)
-                        .await
-                        .expect("Unable to write data to file")
-                }
+                common::write_data_to_offset(msg, file_currently_writing.as_mut().unwrap()).await;
+
             }
             Err(e) => {
                 error!("Error in response stream from server: {:?}", e);
@@ -165,6 +159,7 @@ fn file_to_chunked_file_sync(path: &PathBuf) -> impl Stream<Item = FileSync> {
         let mut file = tokio::fs::File::open(&path).await.unwrap();
         let mut buffer = vec![0u8; 8192];
         let mut offset = 0;
+        let file_size = file.metadata().await.unwrap().len();
 
         while let Ok(n) = file.read(&mut buffer).await {
             if n == 0 { break; }
@@ -175,8 +170,9 @@ fn file_to_chunked_file_sync(path: &PathBuf) -> impl Stream<Item = FileSync> {
                 chunk: buffer[..n].to_vec(),
                 offset: offset,
                 is_final: false,
+                file_size: file_size,
             };
-            offset += n as i64;
+            offset += n as u64;
         }
     }
 }

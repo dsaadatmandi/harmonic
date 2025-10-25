@@ -2,15 +2,17 @@ use chrono::prelude::Utc;
 use log::info;
 use serde;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
+use tokio::fs::{File, OpenOptions};
 use walkdir::WalkDir;
 
-use crate::harmonic::{FileStatus, FileType, UpdateStrategy};
+use crate::harmonic::{FileStatus, FileSync, FileType, UpdateStrategy};
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -195,4 +197,26 @@ pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Di
     }
 
     diffs
+}
+
+pub async fn write_data_to_offset(data: FileSync, file: &mut File) {
+    file.seek(std::io::SeekFrom::Start(data.offset)).await.expect("Seek failed");
+    
+    file.write_all(&data.chunk).await.expect("Chunk write failed");
+
+}
+
+pub async fn get_file(data: &FileSync) -> File {
+    let pb = PathBuf::from(&data.path);
+
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(pb)
+        .await
+        .expect("Could not create new file.");
+
+    file.set_len(data.file_size).await;
+
+    file
 }
