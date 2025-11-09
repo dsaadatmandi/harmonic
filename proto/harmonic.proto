@@ -13,7 +13,7 @@ enum FileType {
   PDF = 2;
 }
 
-enum UpdateStrategy {
+enum TransferDirection {
   SKIP = 0;
   SERVER_SEND = 1;
   CLIENT_SEND = 2;
@@ -35,17 +35,12 @@ message FileStatus {
 message ServerSyncStateResponse {
   string sync_uuid = 1;
   int64 timestamp_micro = 2;
-  repeated StrategyPerFile strategy = 3;
+  repeated FileAction sync_plan = 3;
 }
 
-message StrategyPerFile {
+message FileAction {
   string path = 1;
-  UpdateStrategy strategy = 2;
-}
-
-message StatusResponse {
-  int64 timestamp_micro = 1;
-  UpdateStrategy strategy = 2;
+  TransferDirection direction = 2;
 }
 
 message FileSync {

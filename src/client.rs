@@ -12,7 +12,7 @@ use tonic::transport::Channel;
 use uuid::Uuid;
 
 use crate::common::ChangeType;
-use crate::harmonic::{FileSync, ServerSyncStateResponse, UpdateStrategy};
+use crate::harmonic::{FileSync, ServerSyncStateResponse, TransferDirection};
 
 pub mod common;
 
@@ -50,7 +50,7 @@ async fn main() {
 
     let files_to_send = handle_response(response);
 
-    let result = send_data_to_server(client.clone(), files_to_send).await;
+    let result = send_data_to_server(client.clone(), files_to_send, &sync_uuid).await;
     match result {
         Ok(()) => info!("Completed Sync"),
         Err(e) => error!("Sync failed due to: {:?}", e),
@@ -83,11 +83,11 @@ fn handle_response(response: ServerSyncStateResponse) -> Vec<PathBuf> {
     info!("Handling server response after initial request");
 
     response
-        .strategy
+        .sync_plan
         .into_iter()
         .filter_map(
-            |strat| match UpdateStrategy::try_from(strat.strategy).ok()? {
-                UpdateStrategy::ClientSend => Some(PathBuf::from(strat.path)),
+            |action| match TransferDirection::try_from(action.direction).ok()? {
+                TransferDirection::ClientSend => Some(PathBuf::from(action.path)),
                 _ => None,
             },
         )
@@ -97,17 +97,22 @@ fn handle_response(response: ServerSyncStateResponse) -> Vec<PathBuf> {
 async fn send_data_to_server(
     mut client: HarmonicClient<Channel>,
     files: Vec<PathBuf>,
+    sync_uuid: &Uuid
 ) -> Result<(), Box<dyn Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let out = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let mut request = tonic::Request::new(out);
+    request.metadata_mut().insert(
+        "session_uuid",
+        sync_uuid.to_string().parse().unwrap());
     let mut inc = client
-        .harmonize_synchronize_state(tonic::Request::new(out))
+        .harmonize_synchronize_state(request)
         .await?
         .into_inner();
 
     let send_task = tokio::spawn(async move {
         for f in files {
-            let stream = file_to_chunked_file_sync(&f);
+            let stream = common::file_to_chunked_file_sync(&f);
             pin_mut!(stream);
             while let Some(file_sync) = stream.next().await {
                 let response = tx.send(file_sync.clone()).await;
@@ -152,27 +157,4 @@ async fn send_data_to_server(
     send_task.await?;
 
     Ok(())
-}
-
-fn file_to_chunked_file_sync(path: &PathBuf) -> impl Stream<Item = FileSync> {
-    async_stream::stream! {
-        let mut file = tokio::fs::File::open(&path).await.unwrap();
-        let mut buffer = vec![0u8; 8192];
-        let mut offset = 0;
-        let file_size = file.metadata().await.unwrap().len();
-
-        while let Ok(n) = file.read(&mut buffer).await {
-            if n == 0 { break; }
-
-            yield FileSync {
-                sync_uuid: "TBD".to_string(),
-                path: path.to_str().expect("Could not convert PathBuf to string slice").to_string(),
-                chunk: buffer[..n].to_vec(),
-                offset: offset,
-                is_final: false,
-                file_size: file_size,
-            };
-            offset += n as u64;
-        }
-    }
 }

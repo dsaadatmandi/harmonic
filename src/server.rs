@@ -1,44 +1,105 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
 
 use chrono::prelude::*;
 
-use futures::StreamExt;
+use futures::lock::Mutex;
+use futures::{pin_mut, StreamExt};
 use notify::EventKind;
 use tokio::fs::File;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use harmonic::harmonic_server::{Harmonic, HarmonicServer};
-use harmonic::{FileSync, StatusResponse, UpdateStrategy};
+use harmonic::{FileSync, TransferDirection, FileStatus};
 use tonic::{Request, Response, Status, Streaming, transport::Server};
 use log::{error, info};
+use uuid::Uuid;
+
+use crate::common::SyncState;
+use crate::harmonic::{ClientSyncState, ServerSyncStateResponse, FileAction};
 
 mod common;
 mod watcher;
+
+#[derive(Clone)]
+struct SessionData {
+    timestamp_micros: i64,
+    local_state: SyncState,
+    sync_plan: Vec<FileAction>,
+}
 
 pub mod harmonic {
     tonic::include_proto!("harmonic");
 }
 
 #[derive(Default, Debug)]
-pub struct HarmonicService {}
+pub struct HarmonicService {
+    sync_sessions: Arc<Mutex<HashMap<Uuid, SessionData>>>
+}
 
 #[tonic::async_trait]
 impl Harmonic for HarmonicService {
     type HarmonizeSynchronizeStateStream = ReceiverStream<Result<FileSync, Status>>;
 
+    async fn harmonize_client_initiate_sync(
+        &self,
+        request: Request<ClientSyncState>) -> Result<Response<ServerSyncStateResponse>, Status> {
+            info!("Received request {:?}", request);
 
-    async fn harmonize_client_initiate_sync() {
-        
+            let config = common::load_config();
+
+
+            info!("Parsing request");
+            let request_message = request.into_inner();
+            let sync_uuid = request_message.sync_uuid;
+            let request_timestamp = DateTime::from_timestamp_micros(request_message.timestamp_last_sync_micro).expect("Could not parse datetime");
+            info!("Got time {:?} from timestamp", request_timestamp);
+            let files_list: Vec<FileStatus> = request_message.status_list;
+
+            let state_now = common::generate_state(&config.sync_path);
+
+            let sync_plan = common::generate_sync_plan(&state_now, &files_list);
+
+
+            self.sync_sessions.lock().await.insert(common::string_to_uuid(&sync_uuid),
+            SessionData {
+                timestamp_micros: Utc::now().timestamp_micros(),
+                local_state: state_now,
+                sync_plan: sync_plan.clone()
+            });
+
+            let response_strategy = ServerSyncStateResponse {
+                sync_uuid: sync_uuid,
+                timestamp_micro: Utc::now().timestamp_micros(),
+                sync_plan: sync_plan
+            };
+
+
+            Ok(Response::new(response_strategy))
+
     }
     async fn harmonize_synchronize_state(
         &self,
         request: Request<Streaming<FileSync>>,
     ) -> Result<Response<Self::HarmonizeSynchronizeStateStream>, Status> {
-        let mut request_stream = request.into_inner();
-        let (tx, rx) = mpsc::channel(10);
+        let session_uuid = request.metadata()
+            .get("session-uuid")
+            .and_then(|m| m.to_str().ok())
+            .and_then(|s| Uuid::from_str(s).ok())
+            .ok_or_else(|| Status::invalid_argument("Missing session uuid"))?;
 
-        tokio::spawn(async move {
+        let session_state = self.sync_sessions.lock().await
+            .get(&session_uuid)
+            .cloned()
+            .ok_or_else(|| Status::not_found("Session not found"))?;
+
+        let mut request_stream = request.into_inner();
+        let (tx, rx) = mpsc::channel::<Result<FileSync, Status>>(10);
+
+        let receiver_task = tokio::spawn(async move {
             let mut cur_file: String = Default::default();
             let mut file_currently_writing: Option<File> = None;
             while let Some(request) = request_stream.next().await {
@@ -63,9 +124,27 @@ impl Harmonic for HarmonicService {
             }
         });
 
+        tokio::spawn(async move {
+            for action in session_state.sync_plan.iter()
+                .filter(|a| a.direction == TransferDirection::ServerSend as i32) {
+                    let path = PathBuf::from(&action.path);
+                    let stream = common::file_to_chunked_file_sync(&path);
+                    pin_mut!(stream);
+                    while let Some(file_sync) = stream.next().await {
+                        if tx.send(Ok(file_sync)).await.is_err() {
+                            error!(
+                                    "There was an error with send data for file {:?}",
+                                    path
+                                );
+                            break;
+                        };
+                    }
+                }
+
+        });
+
+
         Ok(Response::new(ReceiverStream::new(rx)))
-
-
 
     }
 }
