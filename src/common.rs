@@ -4,6 +4,7 @@ use serde;
 use serde::{ Deserialize, Serialize };
 use tokio::io::{ AsyncSeekExt, AsyncWriteExt };
 use uuid::Uuid;
+use std::os::unix::net::SocketAddr;
 use std::{
     collections::{ BTreeMap, BTreeSet },
     fs::{ self },
@@ -22,6 +23,7 @@ use crate::harmonic::{ FileStatus, FileSync, FileType, TransferDirection, FileAc
 pub struct Config {
     uuid: uuid::Uuid,
     pub sync_path: PathBuf,
+    pub socket_addr: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

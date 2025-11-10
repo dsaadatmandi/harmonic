@@ -3,6 +3,12 @@ name = "harmonic"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["event-based"]
+event-based = []
+schedule-based = []
+manual-only = []
+
 [[bin]]
 name = "harmonic-server"
 path = "src/server.rs"
