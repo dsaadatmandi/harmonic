@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -8,10 +8,8 @@ use chrono::prelude::*;
 
 use futures::lock::Mutex;
 use futures::{pin_mut, StreamExt};
-use notify::{EventKind};
 use tokio::fs::File;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 
 use harmonic::harmonic_server::{Harmonic, HarmonicServer};
@@ -20,7 +18,7 @@ use tonic::{Request, Response, Status, Streaming, transport::Server};
 use log::{error, info};
 use uuid::Uuid;
 
-use crate::common::{load_config, load_state, Config, SyncState};
+use crate::common::{SyncState};
 use crate::harmonic::{ClientSyncState, ServerSyncStateResponse, FileAction};
 
 mod common;

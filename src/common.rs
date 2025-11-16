@@ -4,9 +4,7 @@ use serde;
 use serde::{ Deserialize, Serialize };
 use tokio::io::{ AsyncSeekExt, AsyncWriteExt };
 use uuid::Uuid;
-use std::error::Error;
-use std::io::{self, ErrorKind};
-use std::os::unix::net::SocketAddr;
+use std::io::{ ErrorKind };
 use std::{
     collections::{ BTreeMap, BTreeSet },
     fs::{ self },
@@ -16,7 +14,7 @@ use std::{
 };
 use tokio::fs::{ File, OpenOptions };
 use walkdir::WalkDir;
-use tokio_stream::{ Stream, StreamExt };
+use tokio_stream::{ Stream };
 use tokio::io::{ AsyncReadExt };
 
 use crate::harmonic::{ FileStatus, FileSync, FileType, TransferDirection, FileAction };

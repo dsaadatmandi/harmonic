@@ -7,18 +7,16 @@ use futures::lock::Mutex;
 use futures::pin_mut;
 use harmonic::ClientSyncState;
 use harmonic::harmonic_client::HarmonicClient;
-use log::{debug, error, info};
+use log::{error, info};
 use notify::EventKind;
 use once_cell::sync::Lazy;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::{StreamExt};
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-use crate::common::ChangeType;
-use crate::harmonic::{FileSync, ServerSyncStateResponse, TransferDirection};
+use crate::harmonic::{ServerSyncStateResponse, TransferDirection};
 
 pub mod common;
 mod watcher;
