@@ -4,6 +4,8 @@ use serde;
 use serde::{ Deserialize, Serialize };
 use tokio::io::{ AsyncSeekExt, AsyncWriteExt };
 use uuid::Uuid;
+use std::error::Error;
+use std::io::{self, ErrorKind};
 use std::os::unix::net::SocketAddr;
 use std::{
     collections::{ BTreeMap, BTreeSet },
@@ -19,11 +21,11 @@ use tokio::io::{ AsyncReadExt };
 
 use crate::harmonic::{ FileStatus, FileSync, FileType, TransferDirection, FileAction };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    uuid: uuid::Uuid,
     pub sync_path: PathBuf,
     pub socket_addr: String,
+    pub schedule_delay: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -107,9 +109,28 @@ fn save_config(config: Config) {
 }
 
 pub fn load_config() -> Config {
-    let config_toml = fs::read_to_string(config_file_path()).expect("Unable to read file");
+    match fs::read_to_string(config_file_path()) {
+        Ok(config_toml) => toml::from_str(&config_toml).expect("Unable to parse string to toml"),
+        Err(error) => match error.kind() {
+            ErrorKind::NotFound => {
+                info!("Config file not found. Creating with default values.");
+                create_default_config()
+            },
+            _ => {
+                panic!("Failed reading config with uncaught error");
+            }
 
-    toml::from_str(&config_toml).expect("Unable to parse string to toml")
+        },
+            
+    }
+}
+
+fn create_default_config() -> Config {
+    Config {
+        sync_path: PathBuf::from("/opt/harmony/"),
+        socket_addr: "http://[::1]:42069".to_string(),
+        schedule_delay: 3600,
+    }
 }
 
 pub fn save_state(state: SyncState, config: &Config) {

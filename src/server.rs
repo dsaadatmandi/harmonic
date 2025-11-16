@@ -8,7 +8,7 @@ use chrono::prelude::*;
 
 use futures::lock::Mutex;
 use futures::{pin_mut, StreamExt};
-use notify::EventKind;
+use notify::{EventKind};
 use tokio::fs::File;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -20,7 +20,7 @@ use tonic::{Request, Response, Status, Streaming, transport::Server};
 use log::{error, info};
 use uuid::Uuid;
 
-use crate::common::{load_config, SyncState};
+use crate::common::{load_config, load_state, Config, SyncState};
 use crate::harmonic::{ClientSyncState, ServerSyncStateResponse, FileAction};
 
 mod common;
@@ -151,24 +151,6 @@ impl Harmonic for HarmonicService {
     }
 }
 
-fn start_watcher(p: PathBuf) -> JoinHandle<()> {
-    tokio::spawn(async move {
-            let (_watcher, mut rx) = watcher::async_watch(p).await.unwrap();
-
-            while let Some(Ok(event)) = rx.next().await {
-                match event.kind {
-                    EventKind::Modify(_) => println!("Modification event to {:?}", event.paths),
-                    EventKind::Remove(_) => println!("Remove event to {:?}", event.paths),
-                    EventKind::Create(_) => println!("Create event to {:?}", event.paths),
-                    _ => println!(
-                        "Unmatched event of type {:?} to {:?}",
-                        event.kind, event.paths
-                    ),
-                }
-            }
-        })
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = common::load_config();
@@ -179,10 +161,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let harmonic = HarmonicService::default();
 
     let p = PathBuf::from(&config.sync_path);
-
-    #[cfg(feature = "event-based")]
-    let _watcher_task = start_watcher(p);
-
 
     Server::builder()
         .add_service(HarmonicServer::new(harmonic))
