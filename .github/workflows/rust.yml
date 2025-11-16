@@ -19,19 +19,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: harmonic
+            binary: harmonic-linux-x86_64
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            binary: harmonic
+            binary: harmonic-linux-arch
           - os: macos-latest
             target: x86_64-apple-darwin
-            binary: harmonic
+            binary: harmonic-apple-x86_64
           - os: macos-latest
             target: aarch64-apple-darwin
-            binary: harmonic
+            binary: harmonic-apple-arch
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: harmonic.exe
+            binary: harmonic-windows-x86_64.exe
     
     runs-on: ${{ matrix.os }}
     
