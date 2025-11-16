@@ -63,16 +63,20 @@ jobs:
         cross build --release --bin harmonic-server --target ${{ matrix.target }}
         cross build --release --bin harmonic-client --target ${{ matrix.target }}
 
-    - name: Rename binaries
+    - name: Rename binaries (Windows)
+      if: matrix.target == 'x86_64-pc-windows-msvc'
+      run: |
+        mkdir dist
+        cp target/${{ matrix.target }}/release/harmonic-server.exe dist/harmonic-server-${{ matrix.target }}.exe
+        cp target/${{ matrix.target }}/release/harmonic-client.exe dist/harmonic-client-${{ matrix.target }}.exe
+      shell: pwsh
+
+    - name: Rename binaries (Unix)
+      if: matrix.target != 'x86_64-pc-windows-msvc'
       run: |
         mkdir -p dist
-        if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
-          cp target/${{ matrix.target }}/release/harmonic-server.exe dist/harmonic-server-${{ matrix.target }}.exe
-          cp target/${{ matrix.target }}/release/harmonic-client.exe dist/harmonic-client-${{ matrix.target }}.exe
-        else
-          cp target/${{ matrix.target }}/release/harmonic-server dist/harmonic-server-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/harmonic-client dist/harmonic-client-${{ matrix.target }}
-        fi
+        cp target/${{ matrix.target }}/release/harmonic-server dist/harmonic-server-${{ matrix.target }}
+        cp target/${{ matrix.target }}/release/harmonic-client dist/harmonic-client-${{ matrix.target }}
 
     - uses: actions/upload-artifact@v4
       with:
