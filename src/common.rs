@@ -258,7 +258,7 @@ pub async fn get_file(data: &FileSync) -> File {
         .open(pb).await
         .expect("Could not create new file.");
 
-    file.set_len(data.file_size).await;
+    file.set_len(data.file_size).await.expect("Failed to set file length. This error is not recoverable.");
 
     file
 }

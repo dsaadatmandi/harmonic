@@ -12,27 +12,23 @@ use tokio::fs::File;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use harmonic::harmonic_server::{Harmonic, HarmonicServer};
-use harmonic::{FileSync, TransferDirection, FileStatus};
 use tonic::{Request, Response, Status, Streaming, transport::Server};
 use log::{debug, error, info};
 use uuid::Uuid;
 
-use crate::common::{SyncState};
-use crate::harmonic::{ClientSyncState, ServerSyncStateResponse, FileAction};
+use harmonic::common::{self, SyncState};
+use harmonic::harmonic::{
+    ClientSyncState, ServerSyncStateResponse, FileAction, FileSync,
+    TransferDirection, FileStatus,
+    harmonic_server::{Harmonic, HarmonicServer},
+};
 
-mod common;
-mod watcher;
 
 #[derive(Clone)]
 struct SessionData {
     timestamp_micros: i64,
     local_state: SyncState,
     sync_plan: Vec<FileAction>,
-}
-
-pub mod harmonic {
-    tonic::include_proto!("harmonic");
 }
 
 #[derive(Default, Debug)]
@@ -100,7 +96,7 @@ impl Harmonic for HarmonicService {
         let mut request_stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<FileSync, Status>>(10);
 
-        let receiver_task = tokio::spawn(async move {
+        let _receiver_task = tokio::spawn(async move {
             let mut cur_file: String = Default::default();
             let mut file_currently_writing: Option<File> = None;
             while let Some(request) = request_stream.next().await {
@@ -125,7 +121,7 @@ impl Harmonic for HarmonicService {
             }
         });
 
-        tokio::spawn(async move {
+        let _sender_task = tokio::spawn(async move {
             for action in session_state.sync_plan.iter()
                 .filter(|a| a.direction == TransferDirection::ServerSend as i32) {
                     let path = PathBuf::from(&action.path);
@@ -162,8 +158,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .expect("Somehow could not parse address..?");
     let harmonic = HarmonicService::default();
-
-    let p = PathBuf::from(&config.sync_path);
 
     Server::builder()
         .add_service(HarmonicServer::new(harmonic))
