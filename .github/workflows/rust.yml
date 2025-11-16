@@ -3,8 +3,11 @@ name: Rust
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "main" ]
+
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,14 +19,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            binary: harmonic
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            binary: harmonic
           - os: macos-latest
             target: x86_64-apple-darwin
+            binary: harmonic
           - os: macos-latest
             target: aarch64-apple-darwin
+            binary: harmonic
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            binary: harmonic.exe
     
     runs-on: ${{ matrix.os }}
     
@@ -54,6 +62,22 @@ jobs:
     - uses: actions/upload-artifact@v4
       with:
         name: harmonic-${{ matrix.target }}
-        path: target/${{ matrix.target }}/release/harmonic.*
+        path: target/${{ matrix.target }}/release/${{ matrix.binary }}
             
 
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          draft: false
+          prerelease: false
