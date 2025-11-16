@@ -15,7 +15,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use harmonic::harmonic_server::{Harmonic, HarmonicServer};
 use harmonic::{FileSync, TransferDirection, FileStatus};
 use tonic::{Request, Response, Status, Streaming, transport::Server};
-use log::{error, info};
+use log::{debug, error, info};
 use uuid::Uuid;
 
 use crate::common::{SyncState};
@@ -85,6 +85,7 @@ impl Harmonic for HarmonicService {
         &self,
         request: Request<Streaming<FileSync>>,
     ) -> Result<Response<Self::HarmonizeSynchronizeStateStream>, Status> {
+        info!("Responding to state sync stream request");
         let session_uuid = request.metadata()
             .get("session-uuid")
             .and_then(|m| m.to_str().ok())
@@ -143,6 +144,7 @@ impl Harmonic for HarmonicService {
 
         });
 
+        info!("Completed sync.");
 
         Ok(Response::new(ReceiverStream::new(rx)))
 
@@ -151,8 +153,11 @@ impl Harmonic for HarmonicService {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
+    info!("Starting server");
     let config = common::load_config();
     // let address = "[::1]:42069"
+    debug!("Address from config: {:?}", config.socket_addr);
     let address: SocketAddr = config.socket_addr
         .parse()
         .expect("Somehow could not parse address..?");

@@ -5,8 +5,6 @@ use std::sync::Arc;
 
 use futures::lock::Mutex;
 use futures::pin_mut;
-use harmonic::ClientSyncState;
-use harmonic::harmonic_client::HarmonicClient;
 use log::{error, info};
 use notify::EventKind;
 use once_cell::sync::Lazy;
@@ -16,17 +14,12 @@ use tokio_stream::{StreamExt};
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-use crate::harmonic::{ServerSyncStateResponse, TransferDirection};
+use harmonic::common;
+use harmonic::watcher;
+use harmonic::harmonic::{ServerSyncStateResponse, TransferDirection,
+    ClientSyncState, harmonic_client::HarmonicClient };
 
-pub mod common;
-mod watcher;
 
-pub mod harmonic {
-    tonic::include_proto!("harmonic");
-}
-
-const ADDR: &str = "http://[::1]:42069";
-const ROOT_PATH: &str = "/opt/sync";
 const QUEUE_CHECK_SEC_INTERVAL_SEC: u64 = 10;
 
 static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> = Lazy::new(|| {
@@ -35,6 +28,7 @@ static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> = Lazy::new(|| {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let config = common::load_config();
     let p = PathBuf::from(config.sync_path);
     
@@ -60,10 +54,10 @@ async fn trigger_sync() -> JoinHandle<()> {
     tokio::spawn(async move {
         let sync_uuid = Uuid::new_v4();
         let config = common::load_config();
-        let mut client = HarmonicClient::connect(ADDR)
+        let client = HarmonicClient::connect(config.socket_addr)
             .await
             .expect("Error in awaiting client creation.");
-        let last_state = common::load_state(&config);
+        let last_state = common::load_state();
         let now_state = common::generate_state(&config.sync_path);
         let diffs = common::compare_states(&last_state, &now_state);
 
@@ -89,7 +83,7 @@ async fn trigger_sync() -> JoinHandle<()> {
             Err(e) => error!("Sync failed due to: {:?}", e),
         };
 
-        common::save_state(now_state, &config);
+        common::save_state(now_state);
     })
 
 }
@@ -138,7 +132,7 @@ async fn send_data_to_server(
     let out = tokio_stream::wrappers::ReceiverStream::new(rx);
     let mut request = tonic::Request::new(out);
     request.metadata_mut().insert(
-        "session_uuid",
+        "session-uuid",
         sync_uuid.to_string().parse().unwrap());
     let mut inc = client
         .harmonize_synchronize_state(request)
@@ -203,18 +197,18 @@ fn start_watcher(p: PathBuf) -> JoinHandle<()> {
             while let Some(Ok(event)) = rx.next().await {
                 match event.kind {
                     EventKind::Modify(_) => {
-                        println!("Modification event to {:?}", event.paths);
+                        info!("Modification event to {:?}", event.paths);
                         points += 1;
                     },
                     EventKind::Remove(_) => {
-                        println!("Remove event to {:?}", event.paths);
+                        info!("Remove event to {:?}", event.paths);
                         points += 5;
                     },
                     EventKind::Create(_) => {
-                        println!("Create event to {:?}", event.paths);
+                        info!("Create event to {:?}", event.paths);
                         points += 10;
                     },
-                    _ => println!(
+                    _ => info!(
                         "Unmatched event of type {:?} to {:?}",
                         event.kind, event.paths
                     ),
@@ -228,12 +222,10 @@ fn start_watcher(p: PathBuf) -> JoinHandle<()> {
         })
 }
 
+#[cfg(feature = "schedule-based")]
 fn start_scheduler(config: &common::Config) -> JoinHandle<()> {
-    let cf = config.clone();
-    let mut delay_interval = tokio::time::interval(tokio::time::Duration::from_secs(cf.schedule_delay));
-    let p = &cf.sync_path;
+    let mut delay_interval = tokio::time::interval(tokio::time::Duration::from_secs(config.schedule_delay));
     tokio::spawn(async move {
-        let cf = cf;
         loop {
             QUEUE.lock().await.push_back(true);
             delay_interval.tick().await;

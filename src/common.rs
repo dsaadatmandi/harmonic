@@ -1,10 +1,11 @@
 use chrono::prelude::Utc;
-use log::{ info, warn };
+use log::{ debug, info, warn };
 use serde;
 use serde::{ Deserialize, Serialize };
 use tokio::io::{ AsyncSeekExt, AsyncWriteExt };
 use uuid::Uuid;
 use std::io::{ ErrorKind };
+use std::process::exit;
 use std::{
     collections::{ BTreeMap, BTreeSet },
     fs::{ self },
@@ -86,6 +87,7 @@ fn config_dir_path() -> PathBuf {
     let mut path = dirs::config_dir().expect("No path could be created for config dir");
     path.push("harmonic");
 
+    debug!("Config path: {:?}", path);
     path
 }
 
@@ -96,10 +98,23 @@ fn config_file_path() -> PathBuf {
     path
 }
 
+fn state_file_path() -> PathBuf {
+    let mut path = config_dir_path();
+    path.push("state.json");
+
+    path
+}
+
 fn save_config(config: Config) {
     let config_toml = toml
         ::to_string(&config)
         .expect("Unable to serialize config struct to toml format.");
+    
+    debug!("Writing config file to {:?}", config_file_path());
+    fs::DirBuilder::new()
+    .recursive(true)
+    .create(config_dir_path())
+    .unwrap();
 
     fs::write(config_file_path(), config_toml).expect(
         "Unable to write serialized config struct to file."
@@ -107,44 +122,57 @@ fn save_config(config: Config) {
 }
 
 pub fn load_config() -> Config {
+    info!("Loading config.");
     match fs::read_to_string(config_file_path()) {
         Ok(config_toml) => toml::from_str(&config_toml).expect("Unable to parse string to toml"),
         Err(error) => match error.kind() {
             ErrorKind::NotFound => {
                 info!("Config file not found. Creating with default values.");
-                create_default_config()
+                handle_no_config();
+                exit(0);
             },
-            _ => {
-                panic!("Failed reading config with uncaught error");
-            }
-
+            _ => panic!("Failed reading config with uncaught error"),
         },
             
     }
 }
 
-fn create_default_config() -> Config {
-    Config {
-        sync_path: PathBuf::from("/opt/harmony/"),
-        socket_addr: "http://[::1]:42069".to_string(),
+fn handle_no_config() {
+    let c = Config {
+        sync_path: PathBuf::from("/Users/milad/harmonic"),
+        socket_addr: String::from("[::1]:42069"),
         schedule_delay: 3600,
-    }
+    };
+    info!("Saving config to: {:?}", c.sync_path);
+    info!("Please edit config with required values");
+    save_config(c);
 }
 
-pub fn save_state(state: SyncState, config: &Config) {
+pub fn save_state(state: SyncState) {
     let state_json = serde_json
         ::to_string(&state)
         .expect("Unable to serialise state to json format.");
 
-    fs::write(&config.sync_path, state_json).expect(
+    fs::write(state_file_path(), state_json).expect(
         "Unable to write serialized Sync State struct to file."
     );
 }
 
-pub fn load_state(config: &Config) -> SyncState {
-    let state_json = fs::read_to_string(&config.sync_path).expect("Unable to read file");
+pub fn load_state() -> SyncState {
+    match fs::read_to_string(state_file_path()) {
+        Ok(state_json) => serde_json::from_str(&state_json).expect("Unable to parse string to json"),
+        Err(e) => match e.kind() {
+            ErrorKind::NotFound => {
+                info!("Initialising empty state");
+                return SyncState {
+                    last_sync_timestamp_micros: 0,
+                    tree: BTreeMap::new(),
+                }
+            },
+            _ => panic!("Failed reading config with uncaught error"),
+        }
+    }
 
-    serde_json::from_str(&state_json).expect("Unable to parse string to toml")
 }
 
 pub fn generate_state(root_path: &PathBuf) -> SyncState {
@@ -306,6 +334,7 @@ pub fn string_to_uuid(uuid_str: &String) -> Uuid {
 }
 
 pub fn file_to_chunked_file_sync(path: &PathBuf) -> impl Stream<Item = FileSync> {
+    debug!("Writing to file: {:?}", path);
     async_stream::stream! {
         let mut file = tokio::fs::File::open(&path).await.unwrap();
         let mut buffer = vec![0u8; 8192];
