@@ -53,21 +53,31 @@ jobs:
     
     - name: Build
       if: matrix.target != 'aarch64-unknown-linux-gnu'
-      run: cargo build --release --target ${{ matrix.target }}
+      run: |
+        cargo build --release --bin harmonic-server --target ${{ matrix.target }}
+        cargo build --release --bin harmonic-client --target ${{ matrix.target }}
 
     - name: Build (cross)
       if: matrix.target == 'aarch64-unknown-linux-gnu'
-      run: cross build --release --target ${{ matrix.target }}
+      run: |
+        cross build --release --bin harmonic-server --target ${{ matrix.target }}
+        cross build --release --bin harmonic-client --target ${{ matrix.target }}
 
-    - name: Rename binary
+    - name: Rename binaries
       run: |
         mkdir -p dist
-        cp target/${{ matrix.target }}/release/${{ matrix.binary }} dist/harmonic-${{ matrix.target }}${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
+        if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+          cp target/${{ matrix.target }}/release/harmonic-server.exe dist/harmonic-server-${{ matrix.target }}.exe
+          cp target/${{ matrix.target }}/release/harmonic-client.exe dist/harmonic-client-${{ matrix.target }}.exe
+        else
+          cp target/${{ matrix.target }}/release/harmonic-server dist/harmonic-server-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/harmonic-client dist/harmonic-client-${{ matrix.target }}
+        fi
 
     - uses: actions/upload-artifact@v4
       with:
         name: harmonic-${{ matrix.target }}
-        path: dist/harmonic-${{ matrix.target }}${{ matrix.target == 'x86_64-pc-windows-msvc' && '.exe' || '' }}
+        path: dist/*
             
 
   release:
