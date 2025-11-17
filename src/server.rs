@@ -24,7 +24,7 @@ use harmonic::harmonic::{
 };
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct SessionData {
     timestamp_micros: i64,
     local_state: SyncState,

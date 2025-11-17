@@ -27,13 +27,13 @@ pub struct Config {
     pub schedule_delay: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SyncState {
     pub last_sync_timestamp_micros: i64,
     tree: BTreeMap<PathBuf, FileMetadata>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct FileMetadata {
     hash: [u8; 16],
     modified_ts: i64,
