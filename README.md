@@ -5,7 +5,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 ## Development Roadmap
 
 **Foundation**
-- [x] Add some tests -> unit tests
+- [x] Add some tests -> unit tests / file system integration tests
 - [ ] Add extensive integration tests -> if required?
 - [ ] Improve error handling and propagation
 - [x] Fix `futures::lock::Mutex` to `tokio::sync::Mutex`
@@ -28,7 +28,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [ ] Add zero-copy I/O optimizations
 
 **Configurability**
-- [ ] More control over debounce algorithm
+- [x] More control over debounce algorithm
 - [ ] More sync modes that can trigger sync
 
 ---
