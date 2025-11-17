@@ -21,7 +21,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 
 **Performance Enhancements**
 - [ ] Implement compression (zstd?)
-- [ ] Add parallel file transfers
+- [ ] Add parallel file writes
 - [ ] Implement delta sync (converging dynamic rolling hash idea)
 - [ ] Add zero-copy I/O optimizations
 
