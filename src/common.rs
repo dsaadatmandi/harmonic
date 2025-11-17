@@ -40,14 +40,14 @@ pub struct SyncState {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct FileMetadata {
-    hash: [u8; 16],
+    hash: [u8; 32],
     modified_ts: i64,
 }
 
 pub struct Diff {
     path: PathBuf,
     pub change: ChangeType,
-    hash: [u8; 16],
+    hash: [u8; 32],
     modified_ts: i64,
 }
 
@@ -72,7 +72,8 @@ impl FileMetadata {
     fn new<P: AsRef<Path>>(path: P) -> FileMetadata {
         let path = path.as_ref();
         let file = fs::read(&path).expect("Failed to open file.");
-        let hash: [u8; 16] = md5::compute(&file).into();
+        let hash = blake3::hash(&file);
+        let hash: [u8; 32] = *hash.as_bytes();
         let modified_systime = fs
             ::metadata(&path)
             .expect("Unable to read metadata for file")
@@ -388,21 +389,25 @@ mod tests {
                 path: String::from("test1.txt"),
                 timestamp_micro: 123456,
                 file_type: FileType::Other.into(),
-                hash: vec![1, 2, 3, 4],
+                hash: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                          17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
             },
             FileStatus {
                 path: String::from("test2.txt"),
                 timestamp_micro: 654321,
                 file_type: FileType::Other.into(),
-                hash: vec![5, 6, 7, 8],
+                hash: vec![33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+                          49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64],
             },
         ];
 
         let tree = file_status_vec_to_tree(file_statuses);
 
         assert_eq!(tree.len(), 2);
-        assert_eq!(tree.get(&PathBuf::from("test1.txt")), Some(&vec![1, 2, 3, 4]));
-        assert_eq!(tree.get(&PathBuf::from("test2.txt")), Some(&vec![5, 6, 7, 8]));
+        assert_eq!(tree.get(&PathBuf::from("test1.txt")), Some(&vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                                                                      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]));
+        assert_eq!(tree.get(&PathBuf::from("test2.txt")), Some(&vec![33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+                                                                      49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64]));
     }
 
     #[test]
@@ -430,7 +435,7 @@ mod tests {
         now_tree.insert(
             PathBuf::from("new_file.txt"),
             FileMetadata {
-                hash: [1; 16],
+                hash: [1; 32],
                 modified_ts: 2000,
             },
         );
@@ -453,7 +458,7 @@ mod tests {
         before_tree.insert(
             PathBuf::from("old_file.txt"),
             FileMetadata {
-                hash: [1; 16],
+                hash: [1; 32],
                 modified_ts: 1000,
             },
         );
@@ -481,7 +486,7 @@ mod tests {
         before_tree.insert(
             PathBuf::from("modified.txt"),
             FileMetadata {
-                hash: [1; 16],
+                hash: [1; 32],
                 modified_ts: 1000,
             },
         );
@@ -495,7 +500,7 @@ mod tests {
         now_tree.insert(
             PathBuf::from("modified.txt"),
             FileMetadata {
-                hash: [2; 16],
+                hash: [2; 32],
                 modified_ts: 2000,
             },
         );
@@ -519,7 +524,7 @@ mod tests {
         tree.insert(
             PathBuf::from("unchanged.txt"),
             FileMetadata {
-                hash: [1; 16],
+                hash: [1; 32],
                 modified_ts: 1000,
             },
         );
@@ -545,7 +550,7 @@ mod tests {
         local_tree.insert(
             PathBuf::from("file.txt"),
             FileMetadata {
-                hash: [1; 16],
+                hash: [1; 32],
                 modified_ts: 2000,
             },
         );
@@ -559,7 +564,7 @@ mod tests {
             path: String::from("file.txt"),
             timestamp_micro: 1000,
             file_type: FileType::Other.into(),
-            hash: vec![2; 16],
+            hash: vec![2; 32],
         }];
 
         let plan = generate_sync_plan(&state_now, &remote_files);
@@ -575,7 +580,7 @@ mod tests {
         local_tree.insert(
             PathBuf::from("file.txt"),
             FileMetadata {
-                hash: [1; 16],
+                hash: [1; 32],
                 modified_ts: 1000,
             },
         );
@@ -589,7 +594,7 @@ mod tests {
             path: String::from("file.txt"),
             timestamp_micro: 2000,
             file_type: FileType::Other.into(),
-            hash: vec![2; 16],
+            hash: vec![2; 32],
         }];
 
         let plan = generate_sync_plan(&state_now, &remote_files);
@@ -605,7 +610,7 @@ mod tests {
         local_tree.insert(
             PathBuf::from("file.txt"),
             FileMetadata {
-                hash: [1; 16],
+                hash: [1; 32],
                 modified_ts: 1000,
             },
         );
@@ -619,7 +624,7 @@ mod tests {
             path: String::from("file.txt"),
             timestamp_micro: 1000,
             file_type: FileType::Other.into(),
-            hash: vec![1; 16],
+            hash: vec![1; 32],
         }];
 
         let plan = generate_sync_plan(&state_now, &remote_files);
@@ -651,7 +656,8 @@ mod tests {
         let diff = Diff {
             path: PathBuf::from("test_file.txt"),
             change: ChangeType::Modified,
-            hash: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            hash: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                   17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
             modified_ts: 123456789,
         };
 
@@ -661,7 +667,8 @@ mod tests {
         assert_eq!(file_status.timestamp_micro, 123456789);
         assert_eq!(
             file_status.hash,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
         );
     }
 
@@ -675,7 +682,8 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let metadata = FileMetadata::new(&path);
-        let hash: [u8; 16] = md5::compute(data).into();
+        let _h = blake3::hash(data.as_bytes());
+        let hash: [u8; 32] = *_h.as_bytes();
 
         assert_eq!(metadata.hash, hash);
 }

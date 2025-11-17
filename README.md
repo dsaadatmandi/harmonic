@@ -12,7 +12,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [ ] Collect performance metrics
 
 **Security Improvements**
-- [ ] Investigate replacing MD5 (BLAKE3!)
+- [x] Investigate replacing MD5 (BLAKE3!) -> now using faster, more secure BLAKE3 -> enabler for rolling hash partial updates?
 - [ ] Prevent directory traversal attacks
 - [ ] Implement TLS encryption for network traffic
 - [ ] Investigate complexity of authentication/authorization (token-based or mTLS)
