@@ -3,7 +3,7 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use futures::lock::Mutex;
+use tokio::sync::Mutex;
 use futures::pin_mut;
 use log::{error, info};
 use notify::EventKind;
@@ -41,10 +41,12 @@ async fn main() {
     let mut queue_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(QUEUE_CHECK_SEC_INTERVAL_SEC));
 
     loop {
-        if let Some(_) = QUEUE.lock().await.pop_front() {
+        let mut queue = QUEUE.lock().await;
+        if let Some(_) = queue.pop_front() {
+            queue.clear();
+            drop(queue);
             trigger_sync().await;
         }
-        QUEUE.lock().await.clear();
         queue_check_interval.tick().await;
     }
 }
