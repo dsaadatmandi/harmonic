@@ -692,7 +692,7 @@ mod tests {
         let hash: [u8; 32] = *_h.as_bytes();
 
         assert_eq!(metadata.hash, hash);
-    }
+}
 
     #[test]
     fn test_server_uri_ipv4() {
