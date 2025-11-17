@@ -82,7 +82,7 @@ fn test_compare_states_with_real_file_addition() {
 
     // Verify path by converting diffs to FileStatus vec
     let file_statuses: Vec<harmonic::harmonic::FileStatus> = diffs.into_iter().map(|d| d.into()).collect();
-    assert_eq!(file_statuses[0].path, new_file.to_str().unwrap());
+    assert_eq!(file_statuses[0].path, "new_file.txt");
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn test_compare_states_with_real_file_modification() {
 
     // Verify path by converting diffs to FileStatus vec
     let file_statuses: Vec<harmonic::harmonic::FileStatus> = diffs.into_iter().map(|d| d.into()).collect();
-    assert_eq!(file_statuses[0].path, file.to_str().unwrap());
+    assert_eq!(file_statuses[0].path, "modified_file.txt");
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn test_compare_states_with_real_file_removal() {
 
     // Verify path by converting diffs to FileStatus vec
     let file_statuses: Vec<harmonic::harmonic::FileStatus> = diffs.into_iter().map(|d| d.into()).collect();
-    assert_eq!(file_statuses[0].path, file.to_str().unwrap());
+    assert_eq!(file_statuses[0].path, "to_be_removed.txt");
 }
 
 #[test]
@@ -193,17 +193,18 @@ fn test_compare_states_with_multiple_changes() {
 #[tokio::test]
 async fn test_get_file_creates_new_file() {
     let dir = tempdir().unwrap();
-    let file_path = dir.path().join("test_file.txt");
+    let root_path = PathBuf::from(dir.path());
+    let file_path = root_path.join("test_file.txt");
 
     let file_sync = harmonic::harmonic::FileSync {
-        path: file_path.to_str().unwrap().to_string(),
+        path: "test_file.txt".to_string(),
         chunk: vec![],
         offset: 0,
         is_final: false,
         file_size: 1024,
     };
 
-    let file = get_file(&file_sync).await;
+    let file = get_file(&file_sync, &root_path).await;
 
     // Verify file was created
     assert!(file_path.exists());
@@ -216,8 +217,9 @@ async fn test_get_file_creates_new_file() {
 #[tokio::test]
 async fn test_write_data_to_offset() {
     let dir = tempdir().unwrap();
-    let file_path = dir.path().join("offset_test.txt");
-    let path = file_path.to_str().unwrap().to_string();
+    let root_path = PathBuf::from(dir.path());
+    let file_path = root_path.join("offset_test.txt");
+    let path = "offset_test.txt".to_string();
 
     // Create file with specific size
     let file_sync = harmonic::harmonic::FileSync {
@@ -228,7 +230,7 @@ async fn test_write_data_to_offset() {
         file_size: 100,
     };
 
-    let mut file = get_file(&file_sync).await;
+    let mut file = get_file(&file_sync, &root_path).await;
 
     // Write data at offset 0
     let data1 = harmonic::harmonic::FileSync {
@@ -273,13 +275,15 @@ async fn test_write_data_to_offset() {
 #[tokio::test]
 async fn test_file_to_chunked_file_sync() {
     let dir = tempdir().unwrap();
-    let file_path = dir.path().join("chunk_test.txt");
+    let root_path = PathBuf::from(dir.path());
+    let file_path = root_path.join("chunk_test.txt");
 
     // Create a file larger than chunk size (8192 bytes)
     let content = "x".repeat(20000); // 20KB file
     fs::write(&file_path, &content).unwrap();
 
-    let stream = file_to_chunked_file_sync(&file_path);
+    let relative_path = PathBuf::from("chunk_test.txt");
+    let stream = file_to_chunked_file_sync(&relative_path, &root_path);
     pin_mut!(stream);
 
     let mut total_bytes = 0;
@@ -290,7 +294,7 @@ async fn test_file_to_chunked_file_sync() {
         total_bytes += chunk.chunk.len() as u64;
 
         // Verify chunk properties
-        assert_eq!(chunk.path, file_path.to_str().unwrap());
+        assert_eq!(chunk.path, "chunk_test.txt");
         assert_eq!(chunk.file_size, 20000);
         assert!(chunk.chunk.len() <= 8192);
     }
@@ -304,13 +308,15 @@ async fn test_file_to_chunked_file_sync() {
 #[tokio::test]
 async fn test_file_to_chunked_file_sync_small_file() {
     let dir = tempdir().unwrap();
-    let file_path = dir.path().join("small_file.txt");
+    let root_path = PathBuf::from(dir.path());
+    let file_path = root_path.join("small_file.txt");
 
     // Create a small file (less than chunk size)
     let content = "Small file content";
     fs::write(&file_path, &content).unwrap();
 
-    let stream = file_to_chunked_file_sync(&file_path);
+    let relative_path = PathBuf::from("small_file.txt");
+    let stream = file_to_chunked_file_sync(&relative_path, &root_path);
     pin_mut!(stream);
 
     let mut chunks = vec![];
@@ -327,8 +333,9 @@ async fn test_file_to_chunked_file_sync_small_file() {
 #[tokio::test]
 async fn test_roundtrip_file_chunking_and_writing() {
     let dir = tempdir().unwrap();
-    let source_file = dir.path().join("source.txt");
-    let dest_file = dir.path().join("destination.txt");
+    let root_path = PathBuf::from(dir.path());
+    let source_file = root_path.join("source.txt");
+    let dest_file = root_path.join("destination.txt");
 
     // Create source file with known content
     let original_content = "This is a test file with some content that will be chunked and reassembled.".repeat(200);
@@ -339,16 +346,17 @@ async fn test_roundtrip_file_chunking_and_writing() {
 
     // Create destination file
     let file_sync_init = harmonic::harmonic::FileSync {
-        path: dest_file.to_str().unwrap().to_string(),
+        path: "destination.txt".to_string(),
         chunk: vec![],
         offset: 0,
         is_final: false,
         file_size,
     };
-    let mut dest = get_file(&file_sync_init).await;
+    let mut dest = get_file(&file_sync_init, &root_path).await;
 
     // Read source in chunks and write to destination
-    let stream = file_to_chunked_file_sync(&source_file);
+    let relative_source = PathBuf::from("source.txt");
+    let stream = file_to_chunked_file_sync(&relative_source, &root_path);
     pin_mut!(stream);
     while let Some(chunk) = stream.next().await {
         write_data_to_offset(chunk, &mut dest).await;
