@@ -10,6 +10,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [ ] Improve error handling and propagation
 - [x] Fix `futures::lock::Mutex` to `tokio::sync::Mutex`
 - [ ] Collect performance metrics
+- [ ] Add connectivity check on startup / periodically?
 
 **Security Improvements**
 - [x] Investigate replacing MD5 (BLAKE3!) -> now using faster, more secure BLAKE3 -> enabler for rolling hash partial updates?
