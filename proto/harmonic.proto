@@ -44,10 +44,9 @@ message FileAction {
 }
 
 message FileSync {
-  string sync_uuid = 1;
-  string path = 2;
-  bytes chunk = 3;
-  uint64 offset = 4;
-  bool is_final = 5;
-  uint64 file_size = 6;
+  string path = 1;
+  bytes chunk = 2;
+  uint64 offset = 3;
+  bool is_final = 4;
+  uint64 file_size = 5;
 }

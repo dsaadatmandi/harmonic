@@ -152,7 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     info!("Starting server");
     let config = common::load_config();
-    // let address = "[::1]:42069"
+
     debug!("Address from config: {:?}", config.socket_addr);
     let address: SocketAddr = config.socket_addr
         .parse()
