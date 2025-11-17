@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use chrono::prelude::*;
 
-use futures::lock::Mutex;
+use tokio::sync::Mutex;
 use futures::{pin_mut, StreamExt};
 use tokio::fs::File;
 use tokio::sync::mpsc;
