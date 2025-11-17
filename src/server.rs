@@ -31,9 +31,10 @@ struct SessionData {
     sync_plan: Vec<FileAction>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct HarmonicService {
-    sync_sessions: Arc<Mutex<HashMap<Uuid, SessionData>>>
+    sync_sessions: Arc<Mutex<HashMap<Uuid, SessionData>>>,
+    config: common::Config,
 }
 
 #[tonic::async_trait]
@@ -45,9 +46,6 @@ impl Harmonic for HarmonicService {
         request: Request<ClientSyncState>) -> Result<Response<ServerSyncStateResponse>, Status> {
             info!("Received request {:?}", request);
 
-            let config = common::load_config();
-
-
             info!("Parsing request");
             let request_message = request.into_inner();
             let sync_uuid = request_message.sync_uuid;
@@ -55,7 +53,7 @@ impl Harmonic for HarmonicService {
             info!("Got time {:?} from timestamp", request_timestamp);
             let files_list: Vec<FileStatus> = request_message.status_list;
 
-            let state_now = common::generate_state(&config.sync_path);
+            let state_now = common::generate_state(&self.config.sync_path);
 
             let sync_plan = common::generate_sync_plan(&state_now, &files_list);
 
@@ -96,6 +94,9 @@ impl Harmonic for HarmonicService {
         let mut request_stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<FileSync, Status>>(10);
 
+        let sync_path_receiver = self.config.sync_path.clone();
+        let sync_path_sender = sync_path_receiver.clone();
+
         let _receiver_task = tokio::spawn(async move {
             let mut cur_file: String = Default::default();
             let mut file_currently_writing: Option<File> = None;
@@ -106,7 +107,7 @@ impl Harmonic for HarmonicService {
                         info!("Received data for file {}. Writing to path...", path);
 
                         if file_currently_writing.is_none() || cur_file != path {
-                            file_currently_writing = Some(common::get_file(&msg).await);
+                            file_currently_writing = Some(common::get_file(&msg, &sync_path_receiver).await);
                             cur_file = path;
                         }
 
@@ -125,7 +126,7 @@ impl Harmonic for HarmonicService {
             for action in session_state.sync_plan.iter()
                 .filter(|a| a.direction == TransferDirection::ServerSend as i32) {
                     let path = PathBuf::from(&action.path);
-                    let stream = common::file_to_chunked_file_sync(&path);
+                    let stream = common::file_to_chunked_file_sync(&path, &sync_path_sender);
                     pin_mut!(stream);
                     while let Some(file_sync) = stream.next().await {
                         if tx.send(Ok(file_sync)).await.is_err() {
@@ -157,7 +158,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let address: SocketAddr = config.socket_addr
         .parse()
         .expect("Somehow could not parse address..?");
-    let harmonic = HarmonicService::default();
+    let harmonic = HarmonicService {
+        sync_sessions: Arc::new(Mutex::new(HashMap::new())),
+        config,
+    };
 
     Server::builder()
         .add_service(HarmonicServer::new(harmonic))
