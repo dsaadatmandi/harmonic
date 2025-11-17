@@ -79,7 +79,7 @@ async fn trigger_sync() -> JoinHandle<()> {
 
         let files_to_send = handle_response(response);
 
-        let result = send_data_to_server(client.clone(), files_to_send, &sync_uuid).await;
+        let result = send_data_to_server(client.clone(), files_to_send, &sync_uuid, config.sync_path).await;
         match result {
             Ok(()) => info!("Completed Sync"),
             Err(e) => error!("Sync failed due to: {:?}", e),
@@ -128,6 +128,7 @@ async fn send_data_to_server(
     mut client: HarmonicClient<Channel>,
     files: Vec<PathBuf>,
     sync_uuid: &Uuid,
+    sync_path: PathBuf,
 ) -> Result<(), Box<dyn Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let out = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -139,10 +140,11 @@ async fn send_data_to_server(
         .harmonize_synchronize_state(request)
         .await?
         .into_inner();
+    let sync_path_receiver = sync_path.clone();
 
     let send_task = tokio::spawn(async move {
         for f in files {
-            let stream = common::file_to_chunked_file_sync(&f);
+            let stream = common::file_to_chunked_file_sync(&f, &sync_path);
             pin_mut!(stream);
             while let Some(file_sync) = stream.next().await {
                 let response = tx.send(file_sync.clone()).await;
@@ -172,7 +174,7 @@ async fn send_data_to_server(
                 info!("Received data for file {}. Writing to path...", path);
 
                 if file_currently_writing.is_none() || cur_file != path {
-                    file_currently_writing = Some(common::get_file(&msg).await);
+                    file_currently_writing = Some(common::get_file(&msg, &sync_path_receiver).await);
                     cur_file = path;
                 }
 

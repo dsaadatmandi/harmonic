@@ -2,30 +2,30 @@ use chrono::prelude::Utc;
 use log::{ debug, info, warn };
 use serde;
 use serde::{ Deserialize, Serialize };
-use tokio::io::{ AsyncSeekExt, AsyncWriteExt };
-use uuid::Uuid;
-use std::io::{ ErrorKind };
+use std::io::{ Error, ErrorKind };
 use std::process::exit;
 use std::{
     collections::{ BTreeMap, BTreeSet },
     fs::{ self },
     path::{ Path, PathBuf },
-    time::UNIX_EPOCH,
     str::FromStr,
+    time::UNIX_EPOCH,
 };
 use tokio::fs::{ File, OpenOptions };
+use tokio::io::AsyncReadExt;
+use tokio::io::{ AsyncSeekExt, AsyncWriteExt };
+use tokio_stream::Stream;
+use uuid::Uuid;
 use walkdir::WalkDir;
-use tokio_stream::{ Stream };
-use tokio::io::{ AsyncReadExt };
 
-use crate::harmonic::{ FileStatus, FileSync, FileType, TransferDirection, FileAction };
+use crate::harmonic::{ FileAction, FileStatus, FileSync, FileType, TransferDirection };
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
     pub sync_path: PathBuf,
     pub socket_addr: String,
     pub schedule_delay: u64,
-    
+
     pub sync_threshold: u64,
     pub modify_weight: u64,
     pub remove_weight: u64,
@@ -131,16 +131,33 @@ fn state_file_path() -> PathBuf {
     path
 }
 
+fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> PathBuf {
+    sync_path.join(relative_path)
+}
+
+fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf, Error> {
+    absolute_path
+        .strip_prefix(sync_path)
+        .map(|p| p.to_path_buf())
+        .map_err(|_| {
+            Error::new(
+                ErrorKind::InvalidFilename,
+                format!(
+                    "{:?} is not in {:?}. Unable to generate relative path.",
+                    absolute_path,
+                    sync_path
+                )
+            )
+        })
+}
+
 fn save_config(config: Config) {
     let config_toml = toml
         ::to_string(&config)
         .expect("Unable to serialize config struct to toml format.");
-    
+
     debug!("Writing config file to {:?}", config_file_path());
-    fs::DirBuilder::new()
-    .recursive(true)
-    .create(config_dir_path())
-    .unwrap();
+    fs::DirBuilder::new().recursive(true).create(config_dir_path()).unwrap();
 
     fs::write(config_file_path(), config_toml).expect(
         "Unable to write serialized config struct to file."
@@ -151,23 +168,25 @@ pub fn load_config() -> Config {
     info!("Loading config.");
     match fs::read_to_string(config_file_path()) {
         Ok(config_toml) => toml::from_str(&config_toml).expect("Unable to parse string to toml"),
-        Err(error) => match error.kind() {
-            ErrorKind::NotFound => {
-                info!("Config file not found. Creating with default values.");
-                handle_no_config();
-                info!("Program will exit now. Please edit default configuration and try again.");
-                exit(0);
-            },
-            _ => panic!("Failed reading config with uncaught error"),
-        },
-            
+        Err(error) =>
+            match error.kind() {
+                ErrorKind::NotFound => {
+                    info!("Config file not found. Creating with default values.");
+                    handle_no_config();
+                    info!(
+                        "Program will exit now. Please edit default configuration and try again."
+                    );
+                    exit(0);
+                }
+                _ => panic!("Failed reading config with uncaught error"),
+            }
     }
 }
 
 fn handle_no_config() {
     let c = Config::default();
-    info!("Saving config to: {:?}", config_dir_path());
-    info!("Please edit config with required values");
+    println!("Saving config to: {:?}", config_dir_path());
+    println!("Please edit config with required values");
     save_config(c);
 }
 
@@ -183,19 +202,21 @@ pub fn save_state(state: SyncState) {
 
 pub fn load_state() -> SyncState {
     match fs::read_to_string(state_file_path()) {
-        Ok(state_json) => serde_json::from_str(&state_json).expect("Unable to parse string to json"),
-        Err(e) => match e.kind() {
-            ErrorKind::NotFound => {
-                info!("Initialising empty state");
-                return SyncState {
-                    last_sync_timestamp_micros: 0,
-                    tree: BTreeMap::new(),
-                }
-            },
-            _ => panic!("Failed reading config with uncaught error"),
+        Ok(state_json) => {
+            serde_json::from_str(&state_json).expect("Unable to parse string to json")
         }
+        Err(e) =>
+            match e.kind() {
+                ErrorKind::NotFound => {
+                    info!("Initialising empty state");
+                    return SyncState {
+                        last_sync_timestamp_micros: 0,
+                        tree: BTreeMap::new(),
+                    };
+                }
+                _ => panic!("Failed reading config with uncaught error"),
+            }
     }
-
 }
 
 pub fn generate_state(root_path: &PathBuf) -> SyncState {
@@ -206,8 +227,13 @@ pub fn generate_state(root_path: &PathBuf) -> SyncState {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.metadata().unwrap().is_file()) {
-        let metadata = FileMetadata::new(file.path());
-        file_tree.insert(file.into_path(), metadata);
+        let absolute_path = file.path();
+        let metadata = FileMetadata::new(absolute_path);
+
+        let relative_path = get_relative_path(absolute_path, root_path).expect(
+            "File path must be within sync dir"
+        );
+        file_tree.insert(relative_path, metadata);
     }
 
     SyncState {
@@ -272,16 +298,24 @@ pub async fn write_data_to_offset(data: FileSync, file: &mut File) {
     file.write_all(&data.chunk).await.expect("Chunk write failed");
 }
 
-pub async fn get_file(data: &FileSync) -> File {
-    let pb = PathBuf::from(&data.path);
+pub async fn get_file(data: &FileSync, sync_path: &Path) -> File {
+    let relative_path = PathBuf::from(&data.path);
+    let absolute_path = get_absolute_path(&relative_path, sync_path);
 
+    if let Some(parent_path) = absolute_path.parent() {
+        tokio::fs
+            ::create_dir_all(parent_path).await
+            .expect("Unable to create parent path for file}");
+    }
     let file = OpenOptions::new()
         .write(true)
         .create(true)
-        .open(pb).await
+        .open(absolute_path).await
         .expect("Could not create new file.");
 
-    file.set_len(data.file_size).await.expect("Failed to set file length. This error is not recoverable.");
+    file.set_len(data.file_size).await.expect(
+        "Failed to set file length. This error is not recoverable."
+    );
 
     file
 }
@@ -356,10 +390,13 @@ pub fn string_to_uuid(uuid_str: &String) -> Uuid {
     }
 }
 
-pub fn file_to_chunked_file_sync(path: &PathBuf) -> impl Stream<Item = FileSync> {
-    debug!("Writing to file: {:?}", path);
+pub fn file_to_chunked_file_sync(relative_path: &PathBuf, sync_path: &Path) -> impl Stream<Item = FileSync> {
+    let absolute_path = get_absolute_path(relative_path, sync_path);
+    let relative_path_c = relative_path.clone();
+
+    debug!("Writing to file: {:?}", absolute_path);
     async_stream::stream! {
-        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        let mut file = tokio::fs::File::open(&absolute_path).await.unwrap();
         let mut buffer = vec![0u8; 8192];
         let mut offset = 0;
         let file_size = file.metadata().await.unwrap().len();
@@ -370,7 +407,7 @@ pub fn file_to_chunked_file_sync(path: &PathBuf) -> impl Stream<Item = FileSync>
             }
 
             yield FileSync {
-                path: path.to_str().expect("Could not convert PathBuf to string slice").to_string(),
+                path: relative_path_c.to_str().expect("Could not convert PathBuf to string slice").to_string(),
                 chunk: buffer[..n].to_vec(),
                 offset: offset,
                 is_final: false,
@@ -387,7 +424,6 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
-
     #[test]
     fn test_file_status_vec_to_tree() {
         let file_statuses = vec![
@@ -395,25 +431,163 @@ mod tests {
                 path: String::from("test1.txt"),
                 timestamp_micro: 123456,
                 file_type: FileType::Other.into(),
-                hash: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                          17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
+                hash: vec![
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                    19,
+                    20,
+                    21,
+                    22,
+                    23,
+                    24,
+                    25,
+                    26,
+                    27,
+                    28,
+                    29,
+                    30,
+                    31,
+                    32
+                ],
             },
             FileStatus {
                 path: String::from("test2.txt"),
                 timestamp_micro: 654321,
                 file_type: FileType::Other.into(),
-                hash: vec![33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
-                          49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64],
-            },
+                hash: vec![
+                    33,
+                    34,
+                    35,
+                    36,
+                    37,
+                    38,
+                    39,
+                    40,
+                    41,
+                    42,
+                    43,
+                    44,
+                    45,
+                    46,
+                    47,
+                    48,
+                    49,
+                    50,
+                    51,
+                    52,
+                    53,
+                    54,
+                    55,
+                    56,
+                    57,
+                    58,
+                    59,
+                    60,
+                    61,
+                    62,
+                    63,
+                    64
+                ],
+            }
         ];
 
         let tree = file_status_vec_to_tree(file_statuses);
 
         assert_eq!(tree.len(), 2);
-        assert_eq!(tree.get(&PathBuf::from("test1.txt")), Some(&vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                                                      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]));
-        assert_eq!(tree.get(&PathBuf::from("test2.txt")), Some(&vec![33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
-                                                                      49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64]));
+        assert_eq!(
+            tree.get(&PathBuf::from("test1.txt")),
+            Some(
+                &vec![
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                    19,
+                    20,
+                    21,
+                    22,
+                    23,
+                    24,
+                    25,
+                    26,
+                    27,
+                    28,
+                    29,
+                    30,
+                    31,
+                    32
+                ]
+            )
+        );
+        assert_eq!(
+            tree.get(&PathBuf::from("test2.txt")),
+            Some(
+                &vec![
+                    33,
+                    34,
+                    35,
+                    36,
+                    37,
+                    38,
+                    39,
+                    40,
+                    41,
+                    42,
+                    43,
+                    44,
+                    45,
+                    46,
+                    47,
+                    48,
+                    49,
+                    50,
+                    51,
+                    52,
+                    53,
+                    54,
+                    55,
+                    56,
+                    57,
+                    58,
+                    59,
+                    60,
+                    61,
+                    62,
+                    63,
+                    64
+                ]
+            )
+        );
     }
 
     #[test]
@@ -438,13 +612,10 @@ mod tests {
         };
 
         let mut now_tree = BTreeMap::new();
-        now_tree.insert(
-            PathBuf::from("new_file.txt"),
-            FileMetadata {
-                hash: [1; 32],
-                modified_ts: 2000,
-            },
-        );
+        now_tree.insert(PathBuf::from("new_file.txt"), FileMetadata {
+            hash: [1; 32],
+            modified_ts: 2000,
+        });
 
         let now_state = SyncState {
             last_sync_timestamp_micros: 2000,
@@ -461,13 +632,10 @@ mod tests {
     #[test]
     fn test_compare_states_removed_file() {
         let mut before_tree = BTreeMap::new();
-        before_tree.insert(
-            PathBuf::from("old_file.txt"),
-            FileMetadata {
-                hash: [1; 32],
-                modified_ts: 1000,
-            },
-        );
+        before_tree.insert(PathBuf::from("old_file.txt"), FileMetadata {
+            hash: [1; 32],
+            modified_ts: 1000,
+        });
 
         let before_state = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -489,13 +657,10 @@ mod tests {
     #[test]
     fn test_compare_states_modified_file() {
         let mut before_tree = BTreeMap::new();
-        before_tree.insert(
-            PathBuf::from("modified.txt"),
-            FileMetadata {
-                hash: [1; 32],
-                modified_ts: 1000,
-            },
-        );
+        before_tree.insert(PathBuf::from("modified.txt"), FileMetadata {
+            hash: [1; 32],
+            modified_ts: 1000,
+        });
 
         let before_state = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -503,13 +668,10 @@ mod tests {
         };
 
         let mut now_tree = BTreeMap::new();
-        now_tree.insert(
-            PathBuf::from("modified.txt"),
-            FileMetadata {
-                hash: [2; 32],
-                modified_ts: 2000,
-            },
-        );
+        now_tree.insert(PathBuf::from("modified.txt"), FileMetadata {
+            hash: [2; 32],
+            modified_ts: 2000,
+        });
 
         let now_state = SyncState {
             last_sync_timestamp_micros: 2000,
@@ -527,13 +689,10 @@ mod tests {
     #[test]
     fn test_compare_states_no_changes() {
         let mut tree = BTreeMap::new();
-        tree.insert(
-            PathBuf::from("unchanged.txt"),
-            FileMetadata {
-                hash: [1; 32],
-                modified_ts: 1000,
-            },
-        );
+        tree.insert(PathBuf::from("unchanged.txt"), FileMetadata {
+            hash: [1; 32],
+            modified_ts: 1000,
+        });
 
         let before_state = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -553,13 +712,10 @@ mod tests {
     #[test]
     fn test_generate_sync_plan_local_newer() {
         let mut local_tree = BTreeMap::new();
-        local_tree.insert(
-            PathBuf::from("file.txt"),
-            FileMetadata {
-                hash: [1; 32],
-                modified_ts: 2000,
-            },
-        );
+        local_tree.insert(PathBuf::from("file.txt"), FileMetadata {
+            hash: [1; 32],
+            modified_ts: 2000,
+        });
 
         let state_now = SyncState {
             last_sync_timestamp_micros: 2000,
@@ -583,13 +739,10 @@ mod tests {
     #[test]
     fn test_generate_sync_plan_remote_newer() {
         let mut local_tree = BTreeMap::new();
-        local_tree.insert(
-            PathBuf::from("file.txt"),
-            FileMetadata {
-                hash: [1; 32],
-                modified_ts: 1000,
-            },
-        );
+        local_tree.insert(PathBuf::from("file.txt"), FileMetadata {
+            hash: [1; 32],
+            modified_ts: 1000,
+        });
 
         let state_now = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -613,13 +766,10 @@ mod tests {
     #[test]
     fn test_generate_sync_plan_files_identical() {
         let mut local_tree = BTreeMap::new();
-        local_tree.insert(
-            PathBuf::from("file.txt"),
-            FileMetadata {
-                hash: [1; 32],
-                modified_ts: 1000,
-            },
-        );
+        local_tree.insert(PathBuf::from("file.txt"), FileMetadata {
+            hash: [1; 32],
+            modified_ts: 1000,
+        });
 
         let state_now = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -662,8 +812,10 @@ mod tests {
         let diff = Diff {
             path: PathBuf::from("test_file.txt"),
             change: ChangeType::Modified,
-            hash: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                   17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
+            hash: [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+                25, 26, 27, 28, 29, 30, 31, 32,
+            ],
             modified_ts: 123456789,
         };
 
@@ -673,8 +825,40 @@ mod tests {
         assert_eq!(file_status.timestamp_micro, 123456789);
         assert_eq!(
             file_status.hash,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
+            vec![
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27,
+                28,
+                29,
+                30,
+                31,
+                32
+            ]
         );
     }
 
@@ -692,7 +876,7 @@ mod tests {
         let hash: [u8; 32] = *_h.as_bytes();
 
         assert_eq!(metadata.hash, hash);
-}
+    }
 
     #[test]
     fn test_server_uri_ipv4() {
@@ -773,5 +957,4 @@ mod tests {
         let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
         assert_eq!(socket_addr.port(), 42069);
     }
-
 }
