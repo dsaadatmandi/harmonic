@@ -103,6 +103,12 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    pub fn server_uri(&self) -> String {
+        format!("http://{}", self.socket_addr)
+    }
+}
+
 fn config_dir_path() -> PathBuf {
     let mut path = dirs::config_dir().expect("No path could be created for config dir");
     path.push("harmonic");
@@ -686,6 +692,86 @@ mod tests {
         let hash: [u8; 32] = *_h.as_bytes();
 
         assert_eq!(metadata.hash, hash);
-}
+    }
+
+    #[test]
+    fn test_server_uri_ipv4() {
+        let config = Config {
+            sync_path: PathBuf::from("/tmp/test"),
+            socket_addr: String::from("192.168.1.100:42069"),
+            schedule_delay: 3600,
+            sync_threshold: 20,
+            modify_weight: 2,
+            remove_weight: 5,
+            create_weight: 10,
+        };
+
+        let uri = config.server_uri();
+        assert_eq!(uri, "http://192.168.1.100:42069");
+
+        // Verify the original socket_addr can still be parsed as SocketAddr
+        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
+        assert_eq!(socket_addr.port(), 42069);
+    }
+
+    #[test]
+    fn test_server_uri_ipv6() {
+        let config = Config {
+            sync_path: PathBuf::from("/tmp/test"),
+            socket_addr: String::from("[::1]:42069"),
+            schedule_delay: 3600,
+            sync_threshold: 20,
+            modify_weight: 2,
+            remove_weight: 5,
+            create_weight: 10,
+        };
+
+        let uri = config.server_uri();
+        assert_eq!(uri, "http://[::1]:42069");
+
+        // Verify the original socket_addr can still be parsed as SocketAddr
+        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
+        assert_eq!(socket_addr.port(), 42069);
+    }
+
+    #[test]
+    fn test_server_uri_ipv6_all_interfaces() {
+        let config = Config {
+            sync_path: PathBuf::from("/tmp/test"),
+            socket_addr: String::from("[::]:42069"),
+            schedule_delay: 3600,
+            sync_threshold: 20,
+            modify_weight: 2,
+            remove_weight: 5,
+            create_weight: 10,
+        };
+
+        let uri = config.server_uri();
+        assert_eq!(uri, "http://[::]:42069");
+
+        // Verify the original socket_addr can still be parsed as SocketAddr
+        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
+        assert_eq!(socket_addr.port(), 42069);
+    }
+
+    #[test]
+    fn test_server_uri_ipv4_all_interfaces() {
+        let config = Config {
+            sync_path: PathBuf::from("/tmp/test"),
+            socket_addr: String::from("0.0.0.0:42069"),
+            schedule_delay: 3600,
+            sync_threshold: 20,
+            modify_weight: 2,
+            remove_weight: 5,
+            create_weight: 10,
+        };
+
+        let uri = config.server_uri();
+        assert_eq!(uri, "http://0.0.0.0:42069");
+
+        // Verify the original socket_addr can still be parsed as SocketAddr
+        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
+        assert_eq!(socket_addr.port(), 42069);
+    }
 
 }

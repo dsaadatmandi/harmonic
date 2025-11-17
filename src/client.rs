@@ -56,7 +56,7 @@ async fn trigger_sync() -> JoinHandle<()> {
     tokio::spawn(async move {
         let sync_uuid = Uuid::new_v4();
         let config = common::load_config();
-        let client = HarmonicClient::connect(config.socket_addr)
+        let client = HarmonicClient::connect(config.server_uri())
             .await
             .expect("Error in awaiting client creation.");
         let last_state = common::load_state();
