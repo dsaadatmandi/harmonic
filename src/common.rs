@@ -1,24 +1,25 @@
 use chrono::prelude::Utc;
-use log::{ debug, info, warn };
+use log::{debug, info, warn};
 use serde;
-use serde::{ Deserialize, Serialize };
-use std::io::{ Error, ErrorKind };
+use serde::{Deserialize, Serialize};
+use std::io::{Error, ErrorKind};
 use std::process::exit;
 use std::{
-    collections::{ BTreeMap, BTreeSet },
-    fs::{ self },
-    path::{ Path, PathBuf },
+    collections::{BTreeMap, BTreeSet},
+    fs::{self},
+    path::{Path, PathBuf},
     str::FromStr,
     time::UNIX_EPOCH,
 };
-use tokio::fs::{ File, OpenOptions };
+use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncReadExt;
-use tokio::io::{ AsyncSeekExt, AsyncWriteExt };
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_stream::Stream;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::harmonic::{ FileAction, FileStatus, FileSync, FileType, TransferDirection };
+use crate::error::{HarmonicError, Result};
+use crate::harmonic::{FileAction, FileStatus, FileSync, FileType, TransferDirection};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Config {
@@ -57,35 +58,35 @@ pub enum ChangeType {
     Modified,
 }
 
-impl From<Diff> for FileStatus {
-    fn from(diff: Diff) -> Self {
-        FileStatus {
-            path: diff.path.to_str().expect("Issue converting strange chars.").to_string(),
+impl TryFrom<Diff> for FileStatus {
+    type Error = HarmonicError;
+
+    fn try_from(diff: Diff) -> Result<Self> {
+        Ok(FileStatus {
+            path: diff
+                .path
+                .to_str()
+                .ok_or(HarmonicError::StringInvalid)?
+                .to_string(),
             timestamp_micro: diff.modified_ts,
             file_type: FileType::Other.into(),
             hash: diff.hash.to_vec(),
-        }
+        })
     }
 }
 
 impl FileMetadata {
-    fn new<P: AsRef<Path>>(path: P) -> FileMetadata {
+    fn new<P: AsRef<Path>>(path: P) -> Result<FileMetadata> {
         let path = path.as_ref();
-        let file = fs::read(&path).expect("Failed to open file.");
+        let file = fs::read(&path)?;
         let hash = blake3::hash(&file);
         let hash: [u8; 32] = *hash.as_bytes();
-        let modified_systime = fs
-            ::metadata(&path)
-            .expect("Unable to read metadata for file")
-            .modified()
-            .expect("Unable to read modified time for file");
+        let modified_systime = fs::metadata(&path)?.modified()?;
 
         let modified_ts = modified_systime
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_micros() as i64;
+            .duration_since(UNIX_EPOCH)?.as_micros() as i64;
 
-        Self { hash, modified_ts }
+        Ok(Self { hash, modified_ts })
     }
 }
 
@@ -109,137 +110,126 @@ impl Config {
     }
 }
 
-fn config_dir_path() -> PathBuf {
-    let mut path = dirs::config_dir().expect("No path could be created for config dir");
+fn config_dir_path() -> Result<PathBuf> {
+    let mut path = dirs::config_dir().ok_or(HarmonicError::ConfigError)?;
     path.push("harmonic");
 
     debug!("Config path: {:?}", path);
-    path
+    Ok(path)
 }
 
-fn config_file_path() -> PathBuf {
-    let mut path = config_dir_path();
+fn config_file_path() -> Result<PathBuf> {
+    let mut path = config_dir_path()?;
     path.push("config.toml");
 
-    path
+    Ok(path)
 }
 
-fn state_file_path() -> PathBuf {
-    let mut path = config_dir_path();
+fn state_file_path() -> Result<PathBuf> {
+    let mut path = config_dir_path()?;
     path.push("state.json");
 
-    path
+    Ok(path)
 }
 
 fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> PathBuf {
     sync_path.join(relative_path)
 }
 
-fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf, Error> {
+fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf> {
     absolute_path
         .strip_prefix(sync_path)
         .map(|p| p.to_path_buf())
-        .map_err(|_| {
-            Error::new(
-                ErrorKind::InvalidFilename,
-                format!(
-                    "{:?} is not in {:?}. Unable to generate relative path.",
-                    absolute_path,
-                    sync_path
-                )
-            )
+        .map_err(|_| HarmonicError::PathIntegrityError {
+            path: absolute_path.to_path_buf(),
+            sync_path: sync_path.to_path_buf(),
         })
 }
 
-fn save_config(config: Config) {
-    let config_toml = toml
-        ::to_string(&config)
-        .expect("Unable to serialize config struct to toml format.");
+fn save_config(config: Config) -> Result<()> {
+    let config_toml =
+        toml::to_string(&config)?;
 
     debug!("Writing config file to {:?}", config_file_path());
-    fs::DirBuilder::new().recursive(true).create(config_dir_path()).unwrap();
+    fs::DirBuilder::new()
+        .recursive(true)
+        .create(config_dir_path()?)?;
 
-    fs::write(config_file_path(), config_toml).expect(
-        "Unable to write serialized config struct to file."
-    );
+    fs::write(config_file_path()?, config_toml)?;
+
+    Ok(())
 }
 
-pub fn load_config() -> Config {
+pub fn load_config() -> Result<Config> {
     info!("Loading config.");
-    match fs::read_to_string(config_file_path()) {
-        Ok(config_toml) => toml::from_str(&config_toml).expect("Unable to parse string to toml"),
-        Err(error) =>
-            match error.kind() {
-                ErrorKind::NotFound => {
-                    info!("Config file not found. Creating with default values.");
-                    handle_no_config();
-                    info!(
-                        "Program will exit now. Please edit default configuration and try again."
-                    );
-                    exit(0);
-                }
-                _ => panic!("Failed reading config with uncaught error"),
+    match fs::read_to_string(config_file_path()?) {
+        Ok(config_toml) => Ok(toml::from_str(&config_toml)?),
+        Err(error) => match error.kind() {
+            ErrorKind::NotFound => {
+                info!("Config file not found. Creating with default values.");
+                handle_no_config()?;
+                info!("Program will exit now. Please edit default configuration and try again.");
+                exit(0);
             }
+            _ => Err(HarmonicError::Io(error)),
+        },
     }
 }
 
-fn handle_no_config() {
+fn handle_no_config() -> Result<()> {
     let c = Config::default();
     println!("Saving config to: {:?}", config_dir_path());
     println!("Please edit config with required values");
-    save_config(c);
+    save_config(c)?;
+
+    Ok(())
 }
 
-pub fn save_state(state: SyncState) {
-    let state_json = serde_json
-        ::to_string(&state)
-        .expect("Unable to serialise state to json format.");
+pub fn save_state(state: SyncState) -> Result<()> {
+    let state_json =
+        serde_json::to_string(&state)?;
 
-    fs::write(state_file_path(), state_json).expect(
-        "Unable to write serialized Sync State struct to file."
-    );
+    fs::write(state_file_path()?, state_json)?;
+
+    Ok(())
 }
 
-pub fn load_state() -> SyncState {
-    match fs::read_to_string(state_file_path()) {
-        Ok(state_json) => {
-            serde_json::from_str(&state_json).expect("Unable to parse string to json")
-        }
-        Err(e) =>
-            match e.kind() {
-                ErrorKind::NotFound => {
-                    info!("Initialising empty state");
-                    return SyncState {
-                        last_sync_timestamp_micros: 0,
-                        tree: BTreeMap::new(),
-                    };
-                }
-                _ => panic!("Failed reading config with uncaught error"),
+pub fn load_state() -> Result<SyncState> {
+    match fs::read_to_string(state_file_path()?) {
+        Ok(state_json) => Ok(serde_json::from_str(&state_json)?),
+        Err(e) => match e.kind() {
+            ErrorKind::NotFound => {
+                info!("Initialising empty state");
+                return Ok(SyncState {
+                    last_sync_timestamp_micros: 0,
+                    tree: BTreeMap::new(),
+                });
             }
+            _ => Err(HarmonicError::ConfigError),
+        },
     }
 }
 
-pub fn generate_state(root_path: &PathBuf) -> SyncState {
+pub fn generate_state(root_path: &PathBuf) -> Result<SyncState> {
     let mut file_tree: BTreeMap<PathBuf, FileMetadata> = BTreeMap::new();
 
     // TODO: log
     for file in WalkDir::new(root_path)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.metadata().unwrap().is_file()) {
+        .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
+    {
         let absolute_path = file.path();
         let metadata = FileMetadata::new(absolute_path);
 
-        let relative_path = get_relative_path(absolute_path, root_path).expect(
-            "File path must be within sync dir"
-        );
-        file_tree.insert(relative_path, metadata);
+        let relative_path = get_relative_path(absolute_path, root_path)?;
+        file_tree.insert(relative_path, metadata?);
     }
 
-    SyncState {
+    Ok(SyncState {
         last_sync_timestamp_micros: Utc::now().timestamp_micros(),
         tree: file_tree,
-    }
+    })
 }
 
 pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Diff> {
@@ -247,7 +237,8 @@ pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Di
 
     let mut diffs = Vec::new();
 
-    let all_paths: BTreeSet<&PathBuf> = before_state.tree
+    let all_paths: BTreeSet<&PathBuf> = before_state
+        .tree
         .keys()
         .chain(now_state.tree.keys())
         .collect();
@@ -270,20 +261,18 @@ pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Di
                     modified_ts: mts,
                 });
             }
-            (Some(meta), None) =>
-                diffs.push(Diff {
-                    path: path.to_owned(),
-                    change: ChangeType::Added,
-                    hash: meta.hash,
-                    modified_ts: meta.modified_ts,
-                }),
-            (None, Some(meta)) =>
-                diffs.push(Diff {
-                    path: path.to_owned(),
-                    change: ChangeType::Removed,
-                    hash: meta.hash,
-                    modified_ts: meta.modified_ts,
-                }),
+            (Some(meta), None) => diffs.push(Diff {
+                path: path.to_owned(),
+                change: ChangeType::Added,
+                hash: meta.hash,
+                modified_ts: meta.modified_ts,
+            }),
+            (None, Some(meta)) => diffs.push(Diff {
+                path: path.to_owned(),
+                change: ChangeType::Removed,
+                hash: meta.hash,
+                modified_ts: meta.modified_ts,
+            }),
             (Some(_), Some(_)) => {}
             (None, None) => unreachable!(),
         }
@@ -292,32 +281,34 @@ pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Di
     diffs
 }
 
-pub async fn write_data_to_offset(data: FileSync, file: &mut File) {
-    file.seek(std::io::SeekFrom::Start(data.offset)).await.expect("Seek failed");
+pub async fn write_data_to_offset(data: FileSync, file: &mut File) -> Result<()> {
+    file.seek(std::io::SeekFrom::Start(data.offset))
+        .await?;
 
-    file.write_all(&data.chunk).await.expect("Chunk write failed");
+    file.write_all(&data.chunk)
+        .await?;
+
+    Ok(())
 }
 
-pub async fn get_file(data: &FileSync, sync_path: &Path) -> File {
+pub async fn get_file(data: &FileSync, sync_path: &Path) -> Result<File> {
     let relative_path = PathBuf::from(&data.path);
     let absolute_path = get_absolute_path(&relative_path, sync_path);
 
     if let Some(parent_path) = absolute_path.parent() {
-        tokio::fs
-            ::create_dir_all(parent_path).await
-            .expect("Unable to create parent path for file}");
+        tokio::fs::create_dir_all(parent_path)
+            .await?;
     }
     let file = OpenOptions::new()
         .write(true)
         .create(true)
-        .open(absolute_path).await
-        .expect("Could not create new file.");
+        .open(absolute_path)
+        .await?;
 
-    file.set_len(data.file_size).await.expect(
-        "Failed to set file length. This error is not recoverable."
-    );
+    file.set_len(data.file_size)
+        .await?;
 
-    file
+    Ok(file)
 }
 
 pub fn file_status_vec_to_tree(file_status_vec: Vec<FileStatus>) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -332,8 +323,8 @@ pub fn file_status_vec_to_tree(file_status_vec: Vec<FileStatus>) -> BTreeMap<Pat
 
 pub fn generate_sync_plan(
     state_now: &SyncState,
-    remote_files: &Vec<FileStatus>
-) -> Vec<FileAction> {
+    remote_files: &Vec<FileStatus>,
+) -> Result<Vec<FileAction>> {
     let mut sync_plan: Vec<FileAction> = Vec::new();
 
     let remote_tree: BTreeMap<PathBuf, &FileStatus> = remote_files
@@ -373,48 +364,72 @@ pub fn generate_sync_plan(
             _ => TransferDirection::Skip,
         };
 
+        let path_str = path.to_str().ok_or(HarmonicError::StringInvalid)?;
+
         sync_plan.push(FileAction {
-            path: path.to_str().expect("path_to_str").to_string(),
+            path: path_str.to_string(),
             direction: direction.into(),
         });
     }
 
-    sync_plan
+    Ok(sync_plan)
 }
 
-pub fn string_to_uuid(uuid_str: &String) -> Uuid {
-    match Uuid::from_str(uuid_str) {
-        Ok(uuid) => uuid,
-        Err(e) =>
-            panic!("Failed to convert uuid string {} into Uuid struct due to: {:?}", uuid_str, e),
-    }
-}
-
-pub fn file_to_chunked_file_sync(relative_path: &PathBuf, sync_path: &Path) -> impl Stream<Item = FileSync> {
+pub fn file_to_chunked_file_sync(
+    relative_path: &PathBuf,
+    sync_path: &Path,
+) -> impl Stream<Item = Result<FileSync>> {
     let absolute_path = get_absolute_path(relative_path, sync_path);
     let relative_path_c = relative_path.clone();
 
     debug!("Writing to file: {:?}", absolute_path);
     async_stream::stream! {
-        let mut file = tokio::fs::File::open(&absolute_path).await.unwrap();
+        let mut file = match tokio::fs::File::open(&absolute_path).await {
+            Ok(f) => f,
+            Err(e) => {
+                yield Err(HarmonicError::Io(e));
+                return
+            }
+        };
+
+        let file_size = match file.metadata().await {
+            Ok(m) => m.len(),
+            Err(e) => {
+                yield Err(HarmonicError::Io(e));
+                return
+            }
+        };
+
+        let path_str = match relative_path_c.to_str() {
+            Some(s) => s.to_string(),
+            None => {
+                yield Err(HarmonicError::StringInvalid);
+                return
+            }
+        };
         let mut buffer = vec![0u8; 8192];
         let mut offset = 0;
-        let file_size = file.metadata().await.unwrap().len();
 
-        while let Ok(n) = file.read(&mut buffer).await {
-            if n == 0 {
-                break;
+        loop {
+            match file.read(&mut buffer).await {
+            Ok(0) => break,
+            Ok(n) => {
+                yield Ok(FileSync {
+                    path: path_str.clone(),
+                    chunk: buffer[..n].to_vec(),
+                    offset: offset,
+                    is_final: false,
+                    file_size: file_size, 
+                });
+                offset += n as u64;
+            },
+            Err(e) => {
+                yield Err(HarmonicError::Io(e));
+                return
             }
-
-            yield FileSync {
-                path: relative_path_c.to_str().expect("Could not convert PathBuf to string slice").to_string(),
-                chunk: buffer[..n].to_vec(),
-                offset: offset,
-                is_final: false,
-                file_size: file_size,
-            };
-            offset += n as u64;
+            }
         }
+
     }
 }
 
@@ -432,38 +447,8 @@ mod tests {
                 timestamp_micro: 123456,
                 file_type: FileType::Other.into(),
                 hash: vec![
-                    1,
-                    2,
-                    3,
-                    4,
-                    5,
-                    6,
-                    7,
-                    8,
-                    9,
-                    10,
-                    11,
-                    12,
-                    13,
-                    14,
-                    15,
-                    16,
-                    17,
-                    18,
-                    19,
-                    20,
-                    21,
-                    22,
-                    23,
-                    24,
-                    25,
-                    26,
-                    27,
-                    28,
-                    29,
-                    30,
-                    31,
-                    32
+                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                    23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
                 ],
             },
             FileStatus {
@@ -471,40 +456,10 @@ mod tests {
                 timestamp_micro: 654321,
                 file_type: FileType::Other.into(),
                 hash: vec![
-                    33,
-                    34,
-                    35,
-                    36,
-                    37,
-                    38,
-                    39,
-                    40,
-                    41,
-                    42,
-                    43,
-                    44,
-                    45,
-                    46,
-                    47,
-                    48,
-                    49,
-                    50,
-                    51,
-                    52,
-                    53,
-                    54,
-                    55,
-                    56,
-                    57,
-                    58,
-                    59,
-                    60,
-                    61,
-                    62,
-                    63,
-                    64
+                    33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
+                    53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
                 ],
-            }
+            },
         ];
 
         let tree = file_status_vec_to_tree(file_statuses);
@@ -512,96 +467,18 @@ mod tests {
         assert_eq!(tree.len(), 2);
         assert_eq!(
             tree.get(&PathBuf::from("test1.txt")),
-            Some(
-                &vec![
-                    1,
-                    2,
-                    3,
-                    4,
-                    5,
-                    6,
-                    7,
-                    8,
-                    9,
-                    10,
-                    11,
-                    12,
-                    13,
-                    14,
-                    15,
-                    16,
-                    17,
-                    18,
-                    19,
-                    20,
-                    21,
-                    22,
-                    23,
-                    24,
-                    25,
-                    26,
-                    27,
-                    28,
-                    29,
-                    30,
-                    31,
-                    32
-                ]
-            )
+            Some(&vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32
+            ])
         );
         assert_eq!(
             tree.get(&PathBuf::from("test2.txt")),
-            Some(
-                &vec![
-                    33,
-                    34,
-                    35,
-                    36,
-                    37,
-                    38,
-                    39,
-                    40,
-                    41,
-                    42,
-                    43,
-                    44,
-                    45,
-                    46,
-                    47,
-                    48,
-                    49,
-                    50,
-                    51,
-                    52,
-                    53,
-                    54,
-                    55,
-                    56,
-                    57,
-                    58,
-                    59,
-                    60,
-                    61,
-                    62,
-                    63,
-                    64
-                ]
-            )
+            Some(&vec![
+                33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+                54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64
+            ])
         );
-    }
-
-    #[test]
-    fn test_string_to_uuid_valid() {
-        let uuid_str = String::from("550e8400-e29b-41d4-a716-446655440000");
-        let uuid = string_to_uuid(&uuid_str);
-        assert_eq!(uuid.to_string(), uuid_str);
-    }
-
-    #[test]
-    #[should_panic(expected = "Failed to convert uuid string")]
-    fn test_string_to_uuid_invalid() {
-        let invalid_uuid = String::from("bad-uuid-string");
-        string_to_uuid(&invalid_uuid);
     }
 
     #[test]
@@ -612,10 +489,13 @@ mod tests {
         };
 
         let mut now_tree = BTreeMap::new();
-        now_tree.insert(PathBuf::from("new_file.txt"), FileMetadata {
-            hash: [1; 32],
-            modified_ts: 2000,
-        });
+        now_tree.insert(
+            PathBuf::from("new_file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: 2000,
+            },
+        );
 
         let now_state = SyncState {
             last_sync_timestamp_micros: 2000,
@@ -632,10 +512,13 @@ mod tests {
     #[test]
     fn test_compare_states_removed_file() {
         let mut before_tree = BTreeMap::new();
-        before_tree.insert(PathBuf::from("old_file.txt"), FileMetadata {
-            hash: [1; 32],
-            modified_ts: 1000,
-        });
+        before_tree.insert(
+            PathBuf::from("old_file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: 1000,
+            },
+        );
 
         let before_state = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -657,10 +540,13 @@ mod tests {
     #[test]
     fn test_compare_states_modified_file() {
         let mut before_tree = BTreeMap::new();
-        before_tree.insert(PathBuf::from("modified.txt"), FileMetadata {
-            hash: [1; 32],
-            modified_ts: 1000,
-        });
+        before_tree.insert(
+            PathBuf::from("modified.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: 1000,
+            },
+        );
 
         let before_state = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -668,10 +554,13 @@ mod tests {
         };
 
         let mut now_tree = BTreeMap::new();
-        now_tree.insert(PathBuf::from("modified.txt"), FileMetadata {
-            hash: [2; 32],
-            modified_ts: 2000,
-        });
+        now_tree.insert(
+            PathBuf::from("modified.txt"),
+            FileMetadata {
+                hash: [2; 32],
+                modified_ts: 2000,
+            },
+        );
 
         let now_state = SyncState {
             last_sync_timestamp_micros: 2000,
@@ -689,10 +578,13 @@ mod tests {
     #[test]
     fn test_compare_states_no_changes() {
         let mut tree = BTreeMap::new();
-        tree.insert(PathBuf::from("unchanged.txt"), FileMetadata {
-            hash: [1; 32],
-            modified_ts: 1000,
-        });
+        tree.insert(
+            PathBuf::from("unchanged.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: 1000,
+            },
+        );
 
         let before_state = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -712,10 +604,13 @@ mod tests {
     #[test]
     fn test_generate_sync_plan_local_newer() {
         let mut local_tree = BTreeMap::new();
-        local_tree.insert(PathBuf::from("file.txt"), FileMetadata {
-            hash: [1; 32],
-            modified_ts: 2000,
-        });
+        local_tree.insert(
+            PathBuf::from("file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: 2000,
+            },
+        );
 
         let state_now = SyncState {
             last_sync_timestamp_micros: 2000,
@@ -729,7 +624,7 @@ mod tests {
             hash: vec![2; 32],
         }];
 
-        let plan = generate_sync_plan(&state_now, &remote_files);
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
@@ -739,10 +634,13 @@ mod tests {
     #[test]
     fn test_generate_sync_plan_remote_newer() {
         let mut local_tree = BTreeMap::new();
-        local_tree.insert(PathBuf::from("file.txt"), FileMetadata {
-            hash: [1; 32],
-            modified_ts: 1000,
-        });
+        local_tree.insert(
+            PathBuf::from("file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: 1000,
+            },
+        );
 
         let state_now = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -756,7 +654,7 @@ mod tests {
             hash: vec![2; 32],
         }];
 
-        let plan = generate_sync_plan(&state_now, &remote_files);
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
@@ -766,10 +664,13 @@ mod tests {
     #[test]
     fn test_generate_sync_plan_files_identical() {
         let mut local_tree = BTreeMap::new();
-        local_tree.insert(PathBuf::from("file.txt"), FileMetadata {
-            hash: [1; 32],
-            modified_ts: 1000,
-        });
+        local_tree.insert(
+            PathBuf::from("file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: 1000,
+            },
+        );
 
         let state_now = SyncState {
             last_sync_timestamp_micros: 1000,
@@ -783,7 +684,7 @@ mod tests {
             hash: vec![1; 32],
         }];
 
-        let plan = generate_sync_plan(&state_now, &remote_files);
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].direction, TransferDirection::Skip as i32);
@@ -791,19 +692,19 @@ mod tests {
 
     #[test]
     fn test_config_dir_path() {
-        let path = config_dir_path();
+        let path = config_dir_path().unwrap();
         assert!(path.ends_with("harmonic"));
     }
 
     #[test]
     fn test_config_file_path() {
-        let path = config_file_path();
+        let path = config_file_path().unwrap();
         assert!(path.ends_with("harmonic/config.toml"));
     }
 
     #[test]
     fn test_state_file_path() {
-        let path = state_file_path();
+        let path = state_file_path().unwrap();
         assert!(path.ends_with("harmonic/state.json"));
     }
 
@@ -813,51 +714,21 @@ mod tests {
             path: PathBuf::from("test_file.txt"),
             change: ChangeType::Modified,
             hash: [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-                25, 26, 27, 28, 29, 30, 31, 32,
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32,
             ],
             modified_ts: 123456789,
         };
 
-        let file_status: FileStatus = diff.into();
+        let file_status: FileStatus = FileStatus::try_from(diff).unwrap();
 
         assert_eq!(file_status.path, "test_file.txt");
         assert_eq!(file_status.timestamp_micro, 123456789);
         assert_eq!(
             file_status.hash,
             vec![
-                1,
-                2,
-                3,
-                4,
-                5,
-                6,
-                7,
-                8,
-                9,
-                10,
-                11,
-                12,
-                13,
-                14,
-                15,
-                16,
-                17,
-                18,
-                19,
-                20,
-                21,
-                22,
-                23,
-                24,
-                25,
-                26,
-                27,
-                28,
-                29,
-                30,
-                31,
-                32
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26, 27, 28, 29, 30, 31, 32
             ]
         );
     }
@@ -875,7 +746,7 @@ mod tests {
         let _h = blake3::hash(data.as_bytes());
         let hash: [u8; 32] = *_h.as_bytes();
 
-        assert_eq!(metadata.hash, hash);
+        assert_eq!(metadata.unwrap().hash, hash);
     }
 
     #[test]

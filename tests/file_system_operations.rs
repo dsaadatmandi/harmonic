@@ -1,9 +1,9 @@
-use tempfile::tempdir;
+use futures::pin_mut;
+use harmonic::{common::*, harmonic::FileStatus};
 use std::{fs, path::PathBuf};
-use harmonic::common::*;
+use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::StreamExt;
-use futures::pin_mut;
 
 mod common;
 
@@ -27,7 +27,7 @@ fn test_generate_state_with_real_files() {
     fs::write(&file3, "This is file 3 in subdirectory").unwrap();
 
     // Generate state
-    let state = generate_state(&root);
+    let state = generate_state(&root).unwrap();
 
     // Verify state was created with a valid timestamp
     assert!(state.last_sync_timestamp_micros > 0);
@@ -35,12 +35,18 @@ fn test_generate_state_with_real_files() {
     // Create another state from empty directory to compare
     let empty_dir = tempdir().unwrap();
     let empty_root = PathBuf::from(empty_dir.path());
-    let empty_state = generate_state(&empty_root);
+    let empty_state = generate_state(&empty_root).unwrap();
 
     // Comparing empty state with our state should show 3 additions
     let diffs = compare_states(&empty_state, &state);
     assert_eq!(diffs.len(), 3);
-    assert_eq!(diffs.iter().filter(|d| matches!(d.change, ChangeType::Added)).count(), 3);
+    assert_eq!(
+        diffs
+            .iter()
+            .filter(|d| matches!(d.change, ChangeType::Added))
+            .count(),
+        3
+    );
 }
 
 #[test]
@@ -48,13 +54,13 @@ fn test_generate_state_empty_directory() {
     let dir = tempdir().unwrap();
     let root = PathBuf::from(dir.path());
 
-    let state = generate_state(&root);
+    let state = generate_state(&root).unwrap();
 
     // Verify timestamp is set
     assert!(state.last_sync_timestamp_micros > 0);
 
     // Verify empty by comparing states
-    let state2 = generate_state(&root);
+    let state2 = generate_state(&root).unwrap();
     let diffs = compare_states(&state, &state2);
     assert_eq!(diffs.len(), 0);
 }
@@ -65,14 +71,14 @@ fn test_compare_states_with_real_file_addition() {
     let root = PathBuf::from(dir.path());
 
     // Generate initial state
-    let state1 = generate_state(&root);
+    let state1 = generate_state(&root).unwrap();
 
     // Add a new file
     let new_file = root.join("new_file.txt");
     fs::write(&new_file, "New content").unwrap();
 
     // Generate new state
-    let state2 = generate_state(&root);
+    let state2 = generate_state(&root).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -81,7 +87,12 @@ fn test_compare_states_with_real_file_addition() {
     assert!(matches!(diffs[0].change, ChangeType::Added));
 
     // Verify path by converting diffs to FileStatus vec
-    let file_statuses: Vec<harmonic::harmonic::FileStatus> = diffs.into_iter().map(|d| d.into()).collect();
+    let file_statuses: Vec<FileStatus> =
+        diffs
+        .into_iter()
+        .map(|d| FileStatus::try_from(d))
+        .collect::<Result<Vec<FileStatus>, _>>()
+        .unwrap();
     assert_eq!(file_statuses[0].path, "new_file.txt");
 }
 
@@ -95,7 +106,7 @@ fn test_compare_states_with_real_file_modification() {
     fs::write(&file, "Original content").unwrap();
 
     // Generate initial state
-    let state1 = generate_state(&root);
+    let state1 = generate_state(&root).unwrap();
 
     // Wait a bit to ensure timestamp changes
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -104,7 +115,7 @@ fn test_compare_states_with_real_file_modification() {
     fs::write(&file, "Modified content - different hash").unwrap();
 
     // Generate new state
-    let state2 = generate_state(&root);
+    let state2 = generate_state(&root).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -113,7 +124,12 @@ fn test_compare_states_with_real_file_modification() {
     assert!(matches!(diffs[0].change, ChangeType::Modified));
 
     // Verify path by converting diffs to FileStatus vec
-    let file_statuses: Vec<harmonic::harmonic::FileStatus> = diffs.into_iter().map(|d| d.into()).collect();
+    let file_statuses: Vec<FileStatus> =
+        diffs
+        .into_iter()
+        .map(|d| FileStatus::try_from(d))
+        .collect::<Result<Vec<FileStatus>, _>>()
+        .unwrap();
     assert_eq!(file_statuses[0].path, "modified_file.txt");
 }
 
@@ -127,13 +143,13 @@ fn test_compare_states_with_real_file_removal() {
     fs::write(&file, "This will be removed").unwrap();
 
     // Generate initial state
-    let state1 = generate_state(&root);
+    let state1 = generate_state(&root).unwrap();
 
     // Remove the file
     fs::remove_file(&file).unwrap();
 
     // Generate new state
-    let state2 = generate_state(&root);
+    let state2 = generate_state(&root).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -142,7 +158,11 @@ fn test_compare_states_with_real_file_removal() {
     assert!(matches!(diffs[0].change, ChangeType::Removed));
 
     // Verify path by converting diffs to FileStatus vec
-    let file_statuses: Vec<harmonic::harmonic::FileStatus> = diffs.into_iter().map(|d| d.into()).collect();
+    let file_statuses: Vec<FileStatus> = diffs
+        .into_iter()
+        .map(|d| FileStatus::try_from(d))
+        .collect::<Result<Vec<FileStatus>, _>>()
+        .unwrap();
     assert_eq!(file_statuses[0].path, "to_be_removed.txt");
 }
 
@@ -161,7 +181,7 @@ fn test_compare_states_with_multiple_changes() {
     fs::write(&file3, "Will be removed").unwrap();
 
     // Generate initial state
-    let state1 = generate_state(&root);
+    let state1 = generate_state(&root).unwrap();
 
     // Wait to ensure timestamp changes
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -173,7 +193,7 @@ fn test_compare_states_with_multiple_changes() {
     fs::write(&file4, "New file added").unwrap(); // Added
 
     // Generate new state
-    let state2 = generate_state(&root);
+    let state2 = generate_state(&root).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -181,9 +201,18 @@ fn test_compare_states_with_multiple_changes() {
     // Should have 3 changes: 1 modified, 1 removed, 1 added
     assert_eq!(diffs.len(), 3);
 
-    let added_count = diffs.iter().filter(|d| matches!(d.change, ChangeType::Added)).count();
-    let modified_count = diffs.iter().filter(|d| matches!(d.change, ChangeType::Modified)).count();
-    let removed_count = diffs.iter().filter(|d| matches!(d.change, ChangeType::Removed)).count();
+    let added_count = diffs
+        .iter()
+        .filter(|d| matches!(d.change, ChangeType::Added))
+        .count();
+    let modified_count = diffs
+        .iter()
+        .filter(|d| matches!(d.change, ChangeType::Modified))
+        .count();
+    let removed_count = diffs
+        .iter()
+        .filter(|d| matches!(d.change, ChangeType::Removed))
+        .count();
 
     assert_eq!(added_count, 1);
     assert_eq!(modified_count, 1);
@@ -204,7 +233,7 @@ async fn test_get_file_creates_new_file() {
         file_size: 1024,
     };
 
-    let file = get_file(&file_sync, &root_path).await;
+    let file = get_file(&file_sync, &root_path).await.unwrap();
 
     // Verify file was created
     assert!(file_path.exists());
@@ -230,7 +259,7 @@ async fn test_write_data_to_offset() {
         file_size: 100,
     };
 
-    let mut file = get_file(&file_sync, &root_path).await;
+    let mut file = get_file(&file_sync, &root_path).await.unwrap();
 
     // Write data at offset 0
     let data1 = harmonic::harmonic::FileSync {
@@ -240,7 +269,7 @@ async fn test_write_data_to_offset() {
         is_final: false,
         file_size: 100,
     };
-    write_data_to_offset(data1, &mut file).await;
+    write_data_to_offset(data1, &mut file).await.unwrap();
 
     // Write data at offset 10
     let data2 = harmonic::harmonic::FileSync {
@@ -250,7 +279,7 @@ async fn test_write_data_to_offset() {
         is_final: false,
         file_size: 100,
     };
-    write_data_to_offset(data2, &mut file).await;
+    write_data_to_offset(data2, &mut file).await.unwrap();
 
     // Flush and sync to ensure data is written
     file.sync_all().await.unwrap();
@@ -290,6 +319,7 @@ async fn test_file_to_chunked_file_sync() {
     let mut chunk_count = 0;
 
     while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
         chunk_count += 1;
         total_bytes += chunk.chunk.len() as u64;
 
@@ -321,7 +351,7 @@ async fn test_file_to_chunked_file_sync_small_file() {
 
     let mut chunks = vec![];
     while let Some(chunk) = stream.next().await {
-        chunks.push(chunk);
+        chunks.push(chunk.unwrap());
     }
 
     // Should be exactly 1 chunk
@@ -338,7 +368,8 @@ async fn test_roundtrip_file_chunking_and_writing() {
     let dest_file = root_path.join("destination.txt");
 
     // Create source file with known content
-    let original_content = "This is a test file with some content that will be chunked and reassembled.".repeat(200);
+    let original_content =
+        "This is a test file with some content that will be chunked and reassembled.".repeat(200);
     fs::write(&source_file, &original_content).unwrap();
 
     // Get file size
@@ -352,14 +383,15 @@ async fn test_roundtrip_file_chunking_and_writing() {
         is_final: false,
         file_size,
     };
-    let mut dest = get_file(&file_sync_init, &root_path).await;
+    let mut dest = get_file(&file_sync_init, &root_path).await.unwrap();
 
     // Read source in chunks and write to destination
     let relative_source = PathBuf::from("source.txt");
     let stream = file_to_chunked_file_sync(&relative_source, &root_path);
     pin_mut!(stream);
     while let Some(chunk) = stream.next().await {
-        write_data_to_offset(chunk, &mut dest).await;
+        let chunk = chunk.unwrap();
+        write_data_to_offset(chunk, &mut dest).await.unwrap();
     }
 
     // Close the file
@@ -375,5 +407,3 @@ async fn test_roundtrip_file_chunking_and_writing() {
     let dest_hash: [u8; 32] = *blake3::hash(&dest_content).as_bytes();
     assert_eq!(source_hash, dest_hash);
 }
-
-

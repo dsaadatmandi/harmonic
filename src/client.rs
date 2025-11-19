@@ -1,7 +1,12 @@
+use anyhow::{Context, Result};
+use harmonic::error::HarmonicError;
+use harmonic::harmonic::{FileStatus, FileSync};
 use std::collections::VecDeque;
 use std::error::Error;
+use std::io::{ErrorKind};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::mpsc::Sender;
 
 use futures::pin_mut;
 use log::{error, info};
@@ -26,9 +31,9 @@ static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> =
     Lazy::new(|| Arc::new(Mutex::new(VecDeque::new())));
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     env_logger::init();
-    let config = common::load_config();
+    let config = common::load_config().context("Failed to load config")?;
     let p = PathBuf::from(&config.sync_path);
 
     #[cfg(feature = "event-based")]
@@ -46,47 +51,68 @@ async fn main() {
         if let Some(_) = queue.pop_front() {
             queue.clear();
             drop(queue);
-            trigger_sync().await;
+            trigger_sync_task().await;
         }
         queue_check_interval.tick().await;
     }
 }
 
-async fn trigger_sync() -> JoinHandle<()> {
+async fn trigger_sync_task() -> JoinHandle<()> {
     tokio::spawn(async move {
-        let sync_uuid = Uuid::new_v4();
-        let config = common::load_config();
-        let client = HarmonicClient::connect(config.server_uri())
-            .await
-            .expect("Error in awaiting client creation.");
-        let last_state = common::load_state();
-        let now_state = common::generate_state(&config.sync_path);
-        let diffs = common::compare_states(&last_state, &now_state);
-
-        if diffs.is_empty() {
-            info!("No updates to push");
-            return;
+        if let Err(e) = run_sync().await {
+            error!("Sync task failed: {:#}", e)
         }
-
-        let response = send_state_to_server(
-            &sync_uuid,
-            last_state.last_sync_timestamp_micros,
-            diffs,
-            client.clone(),
-        )
-        .await
-        .expect("Error awaiting response from server to sync intiation.");
-
-        let files_to_send = handle_response(response);
-
-        let result = send_data_to_server(client.clone(), files_to_send, &sync_uuid, config.sync_path).await;
-        match result {
-            Ok(()) => info!("Completed Sync"),
-            Err(e) => error!("Sync failed due to: {:?}", e),
-        }
-
-        common::save_state(now_state);
     })
+}
+
+async fn run_sync() -> Result<()> {
+    let sync_uuid = Uuid::new_v4();
+    let config = common::load_config().context("Failed to load config")?;
+    let channel = Channel::builder(
+        config
+            .server_uri()
+            .parse()
+            .context("Unable to convert address to URI")?,
+    )
+    .connect()
+    .await
+    .context("Unable to connect")?;
+    let client = HarmonicClient::new(channel);
+    let client = client
+        .send_compressed(CompressionEncoding::Zstd)
+        .accept_compressed(CompressionEncoding::Zstd);
+
+    let last_state = common::load_state().context("Unable to load previous state")?;
+    let now_state =
+        common::generate_state(&config.sync_path).context("Failed to generate state")?;
+    let diffs = common::compare_states(&last_state, &now_state);
+
+    if diffs.is_empty() {
+        info!("No updates to push");
+        return Ok(());
+    }
+
+    let response = send_state_to_server(
+        &sync_uuid,
+        last_state.last_sync_timestamp_micros,
+        diffs,
+        client.clone(),
+    )
+    .await
+    .context("Error awaiting response from server to sync intiation.")?;
+
+    let files_to_send = handle_response(response);
+
+    let result =
+        send_data_to_server(client.clone(), files_to_send, &sync_uuid, config.sync_path).await;
+    match result {
+        Ok(()) => info!("Completed Sync"),
+        Err(e) => error!("Sync failed due to: {:?}", e),
+    }
+
+    common::save_state(now_state).context("Failed to save state")?;
+
+    Ok(())
 }
 
 async fn send_state_to_server(
@@ -94,11 +120,15 @@ async fn send_state_to_server(
     last_sync_timestamp: i64,
     diffs: Vec<common::Diff>,
     mut client: HarmonicClient<Channel>,
-) -> Result<ServerSyncStateResponse, Box<dyn Error>> {
+) -> Result<ServerSyncStateResponse> {
     let request = tonic::Request::new(ClientSyncState {
         sync_uuid: sync_uuid.to_string(),
         timestamp_last_sync_micro: last_sync_timestamp,
-        status_list: diffs.into_iter().map(Into::into).collect(),
+        status_list: diffs
+            .into_iter()
+            .map(|d| FileStatus::try_from(d))
+            .collect::<Result<Vec<_>, _>>()
+            .context("Unable to convert Diff into FileStatus")?,
     });
 
     let response = client
@@ -129,13 +159,17 @@ async fn send_data_to_server(
     files: Vec<PathBuf>,
     sync_uuid: &Uuid,
     sync_path: PathBuf,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<()> {
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let out = tokio_stream::wrappers::ReceiverStream::new(rx);
     let mut request = tonic::Request::new(out);
-    request
-        .metadata_mut()
-        .insert("session-uuid", sync_uuid.to_string().parse().unwrap());
+    request.metadata_mut().insert(
+        "session-uuid",
+        sync_uuid
+            .to_string()
+            .parse()
+            .context("Unable to add session-uuid metadata to grpc request")?,
+    );
     let mut inc = client
         .harmonize_synchronize_state(request)
         .await?
@@ -143,26 +177,9 @@ async fn send_data_to_server(
     let sync_path_receiver = sync_path.clone();
 
     let send_task = tokio::spawn(async move {
-        for f in files {
-            let stream = common::file_to_chunked_file_sync(&f, &sync_path);
-            pin_mut!(stream);
-            while let Some(file_sync) = stream.next().await {
-                let response = tx.send(file_sync.clone()).await;
-                match response {
-                    Err(e) => {
-                        error!(
-                            "There was an error with send data for file {}: {:?}",
-                            file_sync.path, e
-                        );
-                        break;
-                    }
-                    _ => {
-                        continue;
-                    }
-                }
-            }
-        }
-        drop(tx);
+        if let Err(e) = create_send_task(files, &sync_path, tx).await {
+            error!("Send task failed: {:#}", e);
+        };
     });
 
     let mut cur_file: String = Default::default();
@@ -174,11 +191,18 @@ async fn send_data_to_server(
                 info!("Received data for file {}. Writing to path...", path);
 
                 if file_currently_writing.is_none() || cur_file != path {
-                    file_currently_writing = Some(common::get_file(&msg, &sync_path_receiver).await);
+                    file_currently_writing = Some(
+                        common::get_file(&msg, &sync_path_receiver)
+                            .await
+                            .context("Unable to get file to write to")?,
+                    );
                     cur_file = path;
                 }
 
-                common::write_data_to_offset(msg, file_currently_writing.as_mut().unwrap()).await;
+                match file_currently_writing.as_mut() {
+                    Some(f) => common::write_data_to_offset(msg, f).await.context("Failed to write data to offset")?,
+                    None => return Err(HarmonicError::Io(std::io::Error::new(ErrorKind::Other, "Unable to get mutable file to write to")).into())
+                }
             }
             Err(e) => {
                 error!("Error in response stream from server: {:?}", e);
@@ -192,10 +216,46 @@ async fn send_data_to_server(
     Ok(())
 }
 
+async fn create_send_task(
+    files: Vec<PathBuf>,
+    sync_path: &PathBuf,
+    tx: Sender<FileSync>,
+) -> Result<()> {
+    for f in files {
+        let stream = common::file_to_chunked_file_sync(&f, sync_path);
+        pin_mut!(stream);
+        while let Some(file_sync) = stream.next().await {
+            let file_sync = file_sync.context("Could not unpack FileSync from Stream")?;
+            let response = tx.send(file_sync.clone()).await;
+            match response {
+                Err(e) => {
+                    error!(
+                        "There was an error with send data for file {}: {:?}",
+                        file_sync.path, e
+                    );
+                    break;
+                }
+                _ => {
+                    continue;
+                }
+            }
+        }
+    }
+
+    drop(tx);
+    Ok(())
+}
+
 fn start_watcher(p: PathBuf, config: &common::Config) -> JoinHandle<()> {
     let c = config.clone();
     tokio::spawn(async move {
-        let (_watcher, mut rx) = watcher::async_watch(p).await.unwrap();
+        let (_watcher, mut rx) = match watcher::async_watch(p).await {
+            Ok((w, rx)) => (w, rx),
+            Err(e) => {
+                error!("Error in creating file watcher: {:#}", e);
+                return
+            }
+        };
 
         let mut change_score: u64 = 0;
 
@@ -209,6 +269,7 @@ fn start_watcher(p: PathBuf, config: &common::Config) -> JoinHandle<()> {
         }
     })
 }
+
 
 fn calculate_change_score(event_kind: EventKind, config: &common::Config) -> u64 {
     match event_kind {

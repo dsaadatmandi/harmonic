@@ -7,7 +7,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 **Foundation**
 - [x] Add some tests -> unit tests / file system integration tests
 - [ ] Add extensive integration tests -> if required?
-- [ ] Improve error handling and propagation
+- [x] Improve error handling and propagation -> thiserror + anyhow
 - [x] Fix `futures::lock::Mutex` to `tokio::sync::Mutex`
 - [ ] Collect performance metrics
 - [ ] Add connectivity check on startup / periodically?
@@ -22,7 +22,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [ ] Add retry logic with debounce
 
 **Performance Enhancements**
-- [ ] Implement compression (zstd?)
+- [x] Implement compression (zstd?) -> zstd! should make this a feature / configurable
 - [ ] Add parallel file writes
 - [ ] Implement delta sync (converging dynamic rolling hash idea)
 - [ ] Add zero-copy I/O optimizations
