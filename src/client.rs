@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use harmonic::error::HarmonicError;
 use harmonic::harmonic::{FileStatus, FileSync};
+use tonic::codec::CompressionEncoding;
 use std::collections::VecDeque;
-use std::error::Error;
 use std::io::{ErrorKind};
 use std::path::PathBuf;
 use std::sync::Arc;

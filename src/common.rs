@@ -2,20 +2,18 @@ use chrono::prelude::Utc;
 use log::{debug, info, warn};
 use serde;
 use serde::{Deserialize, Serialize};
-use std::io::{Error, ErrorKind};
+use std::io::{ErrorKind};
 use std::process::exit;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self},
     path::{Path, PathBuf},
-    str::FromStr,
     time::UNIX_EPOCH,
 };
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_stream::Stream;
-use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::error::{HarmonicError, Result};

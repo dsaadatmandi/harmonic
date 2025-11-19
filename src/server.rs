@@ -8,6 +8,9 @@ use anyhow::{Context, Result};
 use chrono::prelude::*;
 
 use futures::{StreamExt, pin_mut};
+use log::debug;
+use log::error;
+use log::info;
 use tokio::fs::File;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
