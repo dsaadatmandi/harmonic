@@ -1,5 +1,5 @@
 use futures::pin_mut;
-use harmonic::{common::*, harmonic::FileStatus};
+use harmonic::{sync::*, proto::FileStatus};
 use std::{fs, path::PathBuf};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -225,7 +225,7 @@ async fn test_get_file_creates_new_file() {
     let root_path = PathBuf::from(dir.path());
     let file_path = root_path.join("test_file.txt");
 
-    let file_sync = harmonic::harmonic::FileSync {
+    let file_sync = harmonic::proto::FileSync {
         path: "test_file.txt".to_string(),
         chunk: vec![],
         offset: 0,
@@ -251,7 +251,7 @@ async fn test_write_data_to_offset() {
     let path = "offset_test.txt".to_string();
 
     // Create file with specific size
-    let file_sync = harmonic::harmonic::FileSync {
+    let file_sync = harmonic::proto::FileSync {
         path: path.clone(),
         chunk: vec![],
         offset: 0,
@@ -262,7 +262,7 @@ async fn test_write_data_to_offset() {
     let mut file = get_file(&file_sync, &root_path).await.unwrap();
 
     // Write data at offset 0
-    let data1 = harmonic::harmonic::FileSync {
+    let data1 = harmonic::proto::FileSync {
         path: path.clone(),
         chunk: vec![1, 2, 3, 4, 5],
         offset: 0,
@@ -272,7 +272,7 @@ async fn test_write_data_to_offset() {
     write_data_to_offset(data1, &mut file).await.unwrap();
 
     // Write data at offset 10
-    let data2 = harmonic::harmonic::FileSync {
+    let data2 = harmonic::proto::FileSync {
         path: path.clone(),
         chunk: vec![6, 7, 8, 9, 10],
         offset: 10,
@@ -376,7 +376,7 @@ async fn test_roundtrip_file_chunking_and_writing() {
     let file_size = fs::metadata(&source_file).unwrap().len();
 
     // Create destination file
-    let file_sync_init = harmonic::harmonic::FileSync {
+    let file_sync_init = harmonic::proto::FileSync {
         path: "destination.txt".to_string(),
         chunk: vec![],
         offset: 0,

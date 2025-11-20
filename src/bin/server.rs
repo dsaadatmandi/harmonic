@@ -8,25 +8,29 @@ use anyhow::{Context, Result};
 use chrono::prelude::*;
 
 use futures::{StreamExt, pin_mut};
-use log::debug;
-use log::error;
-use log::info;
+use harmonic::utils::tracing::*;
 use tokio::fs::File;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use tower::ServiceBuilder;
+use tower_http::trace::TraceLayer;
+use tracing::Instrument;
+use tracing::Span;
+use tracing::{debug, error, info, instrument};
 
 use tonic::{Request, Response, Status, Streaming, transport::Server};
 use uuid::Uuid;
 
-use harmonic::common::{self, SyncState};
-use harmonic::harmonic::{
+use harmonic::proto::{
     ClientSyncState, FileAction, FileStatus, FileSync, ServerSyncStateResponse, TransferDirection,
     harmonic_server::{Harmonic, HarmonicServer},
 };
+use harmonic::sync::{self, SyncState};
 
 #[derive(Clone, Debug)]
 struct SessionData {
+    // allow for resume in future
     timestamp_micros: i64,
     local_state: SyncState,
     sync_plan: Vec<FileAction>,
@@ -35,9 +39,10 @@ struct SessionData {
 #[derive(Debug)]
 pub struct HarmonicService {
     sync_sessions: Arc<Mutex<HashMap<Uuid, SessionData>>>,
-    config: common::Config,
+    config: sync::Config,
 }
 
+#[instrument]
 async fn receive_files_task(
     mut request_stream: Streaming<FileSync>,
     sync_path: PathBuf,
@@ -49,18 +54,18 @@ async fn receive_files_task(
         match request {
             Ok(msg) => {
                 let path = msg.path.clone();
-                info!("Received data for file {}. Writing to path...", path);
+                info!(path, "Received data for file. Writing to path...");
 
                 if file_currently_writing.is_none() || cur_file != path {
                     file_currently_writing = Some(
-                        common::get_file(&msg, &sync_path)
+                        sync::get_file(&msg, &sync_path)
                             .await
                             .context("Unable to get file to write to")?,
                     );
                     cur_file = path;
                 }
 
-                common::write_data_to_offset(msg, file_currently_writing.as_mut().unwrap())
+                sync::write_data_to_offset(msg, file_currently_writing.as_mut().unwrap())
                     .await
                     .context("Failed to write data to file")?;
             }
@@ -74,18 +79,20 @@ async fn receive_files_task(
     Ok(())
 }
 
+#[instrument]
 async fn send_files_task(
     session_state: SessionData,
     sync_path: PathBuf,
     tx: mpsc::Sender<Result<FileSync, Status>>,
 ) -> Result<()> {
+    debug!("Begin send files task");
     for action in session_state
         .sync_plan
         .iter()
         .filter(|a| a.direction == TransferDirection::ServerSend as i32)
     {
         let path = PathBuf::from(&action.path);
-        let stream = common::file_to_chunked_file_sync(&path, &sync_path);
+        let stream = sync::file_to_chunked_file_sync(&path, &sync_path);
         pin_mut!(stream);
 
         while let Some(file_sync) = stream.next().await {
@@ -96,6 +103,7 @@ async fn send_files_task(
             }
         }
     }
+    debug!("Completed send files task");
 
     Ok(())
 }
@@ -104,6 +112,7 @@ async fn send_files_task(
 impl Harmonic for HarmonicService {
     type HarmonizeSynchronizeStateStream = ReceiverStream<Result<FileSync, Status>>;
 
+    #[instrument]
     async fn harmonize_client_initiate_sync(
         &self,
         request: Request<ClientSyncState>,
@@ -119,15 +128,19 @@ impl Harmonic for HarmonicService {
         info!("Got time {:?} from timestamp", request_timestamp);
         let files_list: Vec<FileStatus> = request_message.status_list;
 
-        let state_now = common::generate_state(&self.config.sync_path)
-        .map_err(|e| Status::internal(format!("Unable to generate current state: {}", e)))?;
+        let state_now = sync::generate_state(&self.config.sync_path)
+            .map_err(|e| Status::internal(format!("Unable to generate current state: {}", e)))?;
 
-        let sync_plan = common::generate_sync_plan(&state_now, &files_list)
-        .map_err(|e| Status::internal(format!("Unable to generate sync plan: {}", e)))?;
+        let sync_plan = sync::generate_sync_plan(&state_now, &files_list)
+            .map_err(|e| Status::internal(format!("Unable to generate sync plan: {}", e)))?;
 
         self.sync_sessions.lock().await.insert(
-            Uuid::from_str(&sync_uuid)
-            .map_err(|e| Status::invalid_argument(format!("Did not receive valid uuid from client. Conversion failed: {}", e)))?,
+            Uuid::from_str(&sync_uuid).map_err(|e| {
+                Status::invalid_argument(format!(
+                    "Did not receive valid uuid from client. Conversion failed: {}",
+                    e
+                ))
+            })?,
             SessionData {
                 timestamp_micros: Utc::now().timestamp_micros(),
                 local_state: state_now,
@@ -143,6 +156,8 @@ impl Harmonic for HarmonicService {
 
         Ok(Response::new(response_strategy))
     }
+
+    #[instrument]
     async fn harmonize_synchronize_state(
         &self,
         request: Request<Streaming<FileSync>>,
@@ -169,17 +184,21 @@ impl Harmonic for HarmonicService {
         let sync_path_receiver = self.config.sync_path.clone();
         let sync_path_sender = sync_path_receiver.clone();
 
-        let _receiver_task = tokio::spawn(async move {
-            if let Err(e) = receive_files_task(request_stream, sync_path_receiver).await {
-                error!("Error in receiver task: {:?}", e);
+        let _receiver_task = tokio::spawn(
+            async move {
+                if let Err(e) = receive_files_task(request_stream, sync_path_receiver).await {
+                    error!("Error in receiver task: {:?}", e);
+                }
             }
-        });
+            .instrument(Span::current()),
+        );
 
         let _sender_task = tokio::spawn(async move {
             if let Err(e) = send_files_task(session_state, sync_path_sender, tx).await {
                 error!("Error in sender task: {:?}", e);
             }
-        });
+        })
+        .instrument(Span::current());
 
         info!("Completed sync.");
 
@@ -189,9 +208,10 @@ impl Harmonic for HarmonicService {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
     info!("Starting server");
-    let config = common::load_config().context("Failed to load config")?;
+    let config = sync::load_config().context("Failed to load config")?;
+
+    tracing_orchestrator(&config.log_level);
 
     debug!("Address from config: {:?}", config.socket_addr);
     let address: SocketAddr = config
@@ -203,10 +223,17 @@ async fn main() -> Result<()> {
         config,
     };
 
-    Server::builder()
+    let app = Server::builder()
+        .layer(
+            ServiceBuilder::new()
+                .layer(TraceLayer::new_for_grpc().make_span_with(make_span))
+                .map_request(accept_trace),
+        )
         .add_service(HarmonicServer::new(harmonic))
-        .serve(address)
-        .await?;
+        .serve(address);
+
+    info!("Server started");
+    app.await?;
 
     Ok(())
 }

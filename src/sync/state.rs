@@ -1,35 +1,15 @@
 use chrono::prelude::Utc;
-use log::{debug, info, warn};
-use serde;
 use serde::{Deserialize, Serialize};
-use std::io::{ErrorKind};
-use std::process::exit;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs::{self},
-    path::{Path, PathBuf},
-    time::UNIX_EPOCH,
-};
-use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncReadExt;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio_stream::Stream;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+use std::{fs};
+use tracing::{debug, info, instrument, warn};
 use walkdir::WalkDir;
 
-use crate::error::{HarmonicError, Result};
-use crate::harmonic::{FileAction, FileStatus, FileSync, FileType, TransferDirection};
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Config {
-    pub sync_path: PathBuf,
-    pub socket_addr: String,
-    pub schedule_delay: u64,
-
-    pub sync_threshold: u64,
-    pub modify_weight: u64,
-    pub remove_weight: u64,
-    pub create_weight: u64,
-}
+use crate::proto::{FileAction, FileStatus, FileType, TransferDirection};
+use crate::utils::{HarmonicError, Result};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SyncState {
@@ -43,12 +23,15 @@ struct FileMetadata {
     modified_ts: i64,
 }
 
+#[derive(Debug)]
 pub struct Diff {
     path: PathBuf,
     pub change: ChangeType,
     hash: [u8; 32],
     modified_ts: i64,
 }
+
+#[derive(Debug)]
 
 pub enum ChangeType {
     Added,
@@ -81,57 +64,18 @@ impl FileMetadata {
         let hash: [u8; 32] = *hash.as_bytes();
         let modified_systime = fs::metadata(&path)?.modified()?;
 
-        let modified_ts = modified_systime
-            .duration_since(UNIX_EPOCH)?.as_micros() as i64;
+        let modified_ts = modified_systime.duration_since(UNIX_EPOCH)?.as_micros() as i64;
 
         Ok(Self { hash, modified_ts })
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sync_path: PathBuf::from("/Users/milad/harmonic"),
-            socket_addr: String::from("[::1]:42069"),
-            schedule_delay: 3600,
-            sync_threshold: 20,
-            modify_weight: 2,
-            remove_weight: 5,
-            create_weight: 10,
-        }
-    }
-}
-
-impl Config {
-    pub fn server_uri(&self) -> String {
-        format!("http://{}", self.socket_addr)
-    }
-}
-
-fn config_dir_path() -> Result<PathBuf> {
+fn state_file_path() -> Result<PathBuf> {
     let mut path = dirs::config_dir().ok_or(HarmonicError::ConfigError)?;
     path.push("harmonic");
-
-    debug!("Config path: {:?}", path);
-    Ok(path)
-}
-
-fn config_file_path() -> Result<PathBuf> {
-    let mut path = config_dir_path()?;
-    path.push("config.toml");
-
-    Ok(path)
-}
-
-fn state_file_path() -> Result<PathBuf> {
-    let mut path = config_dir_path()?;
     path.push("state.json");
 
     Ok(path)
-}
-
-fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> PathBuf {
-    sync_path.join(relative_path)
 }
 
 fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf> {
@@ -144,48 +88,8 @@ fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf> 
         })
 }
 
-fn save_config(config: Config) -> Result<()> {
-    let config_toml =
-        toml::to_string(&config)?;
-
-    debug!("Writing config file to {:?}", config_file_path());
-    fs::DirBuilder::new()
-        .recursive(true)
-        .create(config_dir_path()?)?;
-
-    fs::write(config_file_path()?, config_toml)?;
-
-    Ok(())
-}
-
-pub fn load_config() -> Result<Config> {
-    info!("Loading config.");
-    match fs::read_to_string(config_file_path()?) {
-        Ok(config_toml) => Ok(toml::from_str(&config_toml)?),
-        Err(error) => match error.kind() {
-            ErrorKind::NotFound => {
-                info!("Config file not found. Creating with default values.");
-                handle_no_config()?;
-                info!("Program will exit now. Please edit default configuration and try again.");
-                exit(0);
-            }
-            _ => Err(HarmonicError::Io(error)),
-        },
-    }
-}
-
-fn handle_no_config() -> Result<()> {
-    let c = Config::default();
-    println!("Saving config to: {:?}", config_dir_path());
-    println!("Please edit config with required values");
-    save_config(c)?;
-
-    Ok(())
-}
-
 pub fn save_state(state: SyncState) -> Result<()> {
-    let state_json =
-        serde_json::to_string(&state)?;
+    let state_json = serde_json::to_string(&state)?;
 
     fs::write(state_file_path()?, state_json)?;
 
@@ -209,18 +113,20 @@ pub fn load_state() -> Result<SyncState> {
 }
 
 pub fn generate_state(root_path: &PathBuf) -> Result<SyncState> {
+    debug!("Generating current sync state");
     let mut file_tree: BTreeMap<PathBuf, FileMetadata> = BTreeMap::new();
 
-    // TODO: log
     for file in WalkDir::new(root_path)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
     {
         let absolute_path = file.path();
+        debug!(?absolute_path, "Getting metadata for path");
         let metadata = FileMetadata::new(absolute_path);
 
         let relative_path = get_relative_path(absolute_path, root_path)?;
+        debug!(?relative_path, ?absolute_path, "Inserted metadata for absolute path with relative path key");
         file_tree.insert(relative_path, metadata?);
     }
 
@@ -230,8 +136,9 @@ pub fn generate_state(root_path: &PathBuf) -> Result<SyncState> {
     })
 }
 
+#[instrument]
 pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Diff> {
-    info!("Computing difference between current state with previous sync state");
+    info!("Begin computing difference between current state with previous sync state");
 
     let mut diffs = Vec::new();
 
@@ -271,42 +178,13 @@ pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Di
                 hash: meta.hash,
                 modified_ts: meta.modified_ts,
             }),
-            (Some(_), Some(_)) => {}
+            (Some(_), Some(_)) => debug!("Identical hash, no action taken"),
             (None, None) => unreachable!(),
         }
     }
+    info!("Completed comparing states");
 
     diffs
-}
-
-pub async fn write_data_to_offset(data: FileSync, file: &mut File) -> Result<()> {
-    file.seek(std::io::SeekFrom::Start(data.offset))
-        .await?;
-
-    file.write_all(&data.chunk)
-        .await?;
-
-    Ok(())
-}
-
-pub async fn get_file(data: &FileSync, sync_path: &Path) -> Result<File> {
-    let relative_path = PathBuf::from(&data.path);
-    let absolute_path = get_absolute_path(&relative_path, sync_path);
-
-    if let Some(parent_path) = absolute_path.parent() {
-        tokio::fs::create_dir_all(parent_path)
-            .await?;
-    }
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(absolute_path)
-        .await?;
-
-    file.set_len(data.file_size)
-        .await?;
-
-    Ok(file)
 }
 
 pub fn file_status_vec_to_tree(file_status_vec: Vec<FileStatus>) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -319,10 +197,12 @@ pub fn file_status_vec_to_tree(file_status_vec: Vec<FileStatus>) -> BTreeMap<Pat
     tree
 }
 
+#[instrument]
 pub fn generate_sync_plan(
     state_now: &SyncState,
     remote_files: &Vec<FileStatus>,
 ) -> Result<Vec<FileAction>> {
+    debug!("Start generating sync plan");
     let mut sync_plan: Vec<FileAction> = Vec::new();
 
     let remote_tree: BTreeMap<PathBuf, &FileStatus> = remote_files
@@ -331,6 +211,13 @@ pub fn generate_sync_plan(
         .collect();
 
     let all_paths: BTreeSet<&PathBuf> = state_now.tree.keys().chain(remote_tree.keys()).collect();
+
+    debug!(
+        local_items = state_now.tree.len(),
+        remote_items = remote_tree.len(),
+        all_items = all_paths.len(),
+        "Gathered local and remote states to compare"
+    );
 
     for path in all_paths {
         let local = state_now.tree.get(path);
@@ -344,17 +231,19 @@ pub fn generate_sync_plan(
                     TransferDirection::ClientSend
                 } else {
                     warn!(
-                        "File hash for {:?} is different but modified timestamp is identical! Needs investigation",
-                        path
+                        ?path,
+                        "File hash is different but modified timestamp is identical! Needs investigation"
                     );
                     TransferDirection::Skip
                 }
             }
             (Some(_), None) => {
+                debug!(?path, "File present on client but not on server");
                 // TODO implement deleted file logic
                 TransferDirection::ServerSend
             }
             (None, Some(_)) => {
+                debug!(?path, "File present on server but not on client");
                 // TODO implement deleted file logic
                 TransferDirection::ClientSend
             }
@@ -364,71 +253,15 @@ pub fn generate_sync_plan(
 
         let path_str = path.to_str().ok_or(HarmonicError::StringInvalid)?;
 
+        debug!(?path_str, ?direction, "Pushing file into sync plan");
         sync_plan.push(FileAction {
             path: path_str.to_string(),
             direction: direction.into(),
         });
     }
+    info!("Completed generating sync plan");
 
     Ok(sync_plan)
-}
-
-pub fn file_to_chunked_file_sync(
-    relative_path: &PathBuf,
-    sync_path: &Path,
-) -> impl Stream<Item = Result<FileSync>> {
-    let absolute_path = get_absolute_path(relative_path, sync_path);
-    let relative_path_c = relative_path.clone();
-
-    debug!("Writing to file: {:?}", absolute_path);
-    async_stream::stream! {
-        let mut file = match tokio::fs::File::open(&absolute_path).await {
-            Ok(f) => f,
-            Err(e) => {
-                yield Err(HarmonicError::Io(e));
-                return
-            }
-        };
-
-        let file_size = match file.metadata().await {
-            Ok(m) => m.len(),
-            Err(e) => {
-                yield Err(HarmonicError::Io(e));
-                return
-            }
-        };
-
-        let path_str = match relative_path_c.to_str() {
-            Some(s) => s.to_string(),
-            None => {
-                yield Err(HarmonicError::StringInvalid);
-                return
-            }
-        };
-        let mut buffer = vec![0u8; 8192];
-        let mut offset = 0;
-
-        loop {
-            match file.read(&mut buffer).await {
-            Ok(0) => break,
-            Ok(n) => {
-                yield Ok(FileSync {
-                    path: path_str.clone(),
-                    chunk: buffer[..n].to_vec(),
-                    offset: offset,
-                    is_final: false,
-                    file_size: file_size, 
-                });
-                offset += n as u64;
-            },
-            Err(e) => {
-                yield Err(HarmonicError::Io(e));
-                return
-            }
-            }
-        }
-
-    }
 }
 
 #[cfg(test)]
@@ -689,18 +522,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_dir_path() {
-        let path = config_dir_path().unwrap();
-        assert!(path.ends_with("harmonic"));
-    }
-
-    #[test]
-    fn test_config_file_path() {
-        let path = config_file_path().unwrap();
-        assert!(path.ends_with("harmonic/config.toml"));
-    }
-
-    #[test]
     fn test_state_file_path() {
         let path = state_file_path().unwrap();
         assert!(path.ends_with("harmonic/state.json"));
@@ -745,85 +566,5 @@ mod tests {
         let hash: [u8; 32] = *_h.as_bytes();
 
         assert_eq!(metadata.unwrap().hash, hash);
-    }
-
-    #[test]
-    fn test_server_uri_ipv4() {
-        let config = Config {
-            sync_path: PathBuf::from("/tmp/test"),
-            socket_addr: String::from("192.168.1.100:42069"),
-            schedule_delay: 3600,
-            sync_threshold: 20,
-            modify_weight: 2,
-            remove_weight: 5,
-            create_weight: 10,
-        };
-
-        let uri = config.server_uri();
-        assert_eq!(uri, "http://192.168.1.100:42069");
-
-        // Verify the original socket_addr can still be parsed as SocketAddr
-        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
-        assert_eq!(socket_addr.port(), 42069);
-    }
-
-    #[test]
-    fn test_server_uri_ipv6() {
-        let config = Config {
-            sync_path: PathBuf::from("/tmp/test"),
-            socket_addr: String::from("[::1]:42069"),
-            schedule_delay: 3600,
-            sync_threshold: 20,
-            modify_weight: 2,
-            remove_weight: 5,
-            create_weight: 10,
-        };
-
-        let uri = config.server_uri();
-        assert_eq!(uri, "http://[::1]:42069");
-
-        // Verify the original socket_addr can still be parsed as SocketAddr
-        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
-        assert_eq!(socket_addr.port(), 42069);
-    }
-
-    #[test]
-    fn test_server_uri_ipv6_all_interfaces() {
-        let config = Config {
-            sync_path: PathBuf::from("/tmp/test"),
-            socket_addr: String::from("[::]:42069"),
-            schedule_delay: 3600,
-            sync_threshold: 20,
-            modify_weight: 2,
-            remove_weight: 5,
-            create_weight: 10,
-        };
-
-        let uri = config.server_uri();
-        assert_eq!(uri, "http://[::]:42069");
-
-        // Verify the original socket_addr can still be parsed as SocketAddr
-        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
-        assert_eq!(socket_addr.port(), 42069);
-    }
-
-    #[test]
-    fn test_server_uri_ipv4_all_interfaces() {
-        let config = Config {
-            sync_path: PathBuf::from("/tmp/test"),
-            socket_addr: String::from("0.0.0.0:42069"),
-            schedule_delay: 3600,
-            sync_threshold: 20,
-            modify_weight: 2,
-            remove_weight: 5,
-            create_weight: 10,
-        };
-
-        let uri = config.server_uri();
-        assert_eq!(uri, "http://0.0.0.0:42069");
-
-        // Verify the original socket_addr can still be parsed as SocketAddr
-        let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
-        assert_eq!(socket_addr.port(), 42069);
     }
 }

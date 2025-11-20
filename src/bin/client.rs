@@ -1,15 +1,18 @@
 use anyhow::{Context, Result};
-use harmonic::error::HarmonicError;
-use harmonic::harmonic::{FileStatus, FileSync};
-use tonic::codec::CompressionEncoding;
+use harmonic::proto::{FileStatus, FileSync};
+use harmonic::utils::HarmonicError;
+use harmonic::utils::tracing::{send_trace, tracing_orchestrator};
 use std::collections::VecDeque;
-use std::io::{ErrorKind};
+use std::fmt::Debug;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
+use tonic::codec::CompressionEncoding;
+#[cfg(feature = "schedule-based")]
+use tracing::instrument::Instrumented;
 
 use futures::pin_mut;
-use log::{error, info};
 use notify::EventKind;
 use once_cell::sync::Lazy;
 use tokio::fs::File;
@@ -17,13 +20,14 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
+use tracing::{Instrument, Span, debug, error, info, instrument};
 use uuid::Uuid;
 
-use harmonic::common;
-use harmonic::harmonic::{
+use harmonic::client::async_watch;
+use harmonic::proto::{
     ClientSyncState, ServerSyncStateResponse, TransferDirection, harmonic_client::HarmonicClient,
 };
-use harmonic::watcher;
+use harmonic::sync;
 
 const QUEUE_CHECK_SEC_INTERVAL_SEC: u64 = 10;
 
@@ -32,15 +36,17 @@ static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> =
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
-    let config = common::load_config().context("Failed to load config")?;
+    let config = sync::load_config().context("Failed to load config")?;
+
+    tracing_orchestrator(&config.log_level);
+
     let p = PathBuf::from(&config.sync_path);
 
     #[cfg(feature = "event-based")]
     let _watcher_task = start_watcher(p, &config);
 
     #[cfg(feature = "schedule-based")]
-    let _scheduler_task = start_scheduler(config);
+    let _scheduler_task = start_scheduler(&config);
 
     let mut queue_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(
         QUEUE_CHECK_SEC_INTERVAL_SEC,
@@ -51,23 +57,31 @@ async fn main() -> Result<()> {
         if let Some(_) = queue.pop_front() {
             queue.clear();
             drop(queue);
-            trigger_sync_task().await;
+            trigger_sync_task()
+                .await
+                .await
+                .context("Sync task failed")?;
         }
         queue_check_interval.tick().await;
     }
 }
 
-async fn trigger_sync_task() -> JoinHandle<()> {
+#[instrument]
+async fn trigger_sync_task() -> Instrumented<JoinHandle<()>> {
     tokio::spawn(async move {
         if let Err(e) = run_sync().await {
             error!("Sync task failed: {:#}", e)
         }
     })
+    .instrument(Span::current())
 }
 
+#[instrument(fields(sync_uuid = tracing::field::Empty))]
 async fn run_sync() -> Result<()> {
+    debug!("Starting sync execution");
     let sync_uuid = Uuid::new_v4();
-    let config = common::load_config().context("Failed to load config")?;
+    tracing::Span::current().record("sync-uuid", tracing::field::display(&sync_uuid));
+    let config = sync::load_config().context("Failed to load config")?;
     let channel = Channel::builder(
         config
             .server_uri()
@@ -77,15 +91,14 @@ async fn run_sync() -> Result<()> {
     .connect()
     .await
     .context("Unable to connect")?;
-    let client = HarmonicClient::new(channel);
+    let client = HarmonicClient::with_interceptor(channel, send_trace);
     let client = client
         .send_compressed(CompressionEncoding::Zstd)
         .accept_compressed(CompressionEncoding::Zstd);
 
-    let last_state = common::load_state().context("Unable to load previous state")?;
-    let now_state =
-        common::generate_state(&config.sync_path).context("Failed to generate state")?;
-    let diffs = common::compare_states(&last_state, &now_state);
+    let last_state = sync::load_state().context("Unable to load previous state")?;
+    let now_state = sync::generate_state(&config.sync_path).context("Failed to generate state")?;
+    let diffs = sync::compare_states(&last_state, &now_state);
 
     if diffs.is_empty() {
         info!("No updates to push");
@@ -110,17 +123,25 @@ async fn run_sync() -> Result<()> {
         Err(e) => error!("Sync failed due to: {:?}", e),
     }
 
-    common::save_state(now_state).context("Failed to save state")?;
+    sync::save_state(now_state).context("Failed to save state")?;
 
     Ok(())
 }
 
-async fn send_state_to_server(
+#[instrument(fields(sync_uuid = %sync_uuid))]
+async fn send_state_to_server<T: Debug>(
     sync_uuid: &Uuid,
     last_sync_timestamp: i64,
-    diffs: Vec<common::Diff>,
-    mut client: HarmonicClient<Channel>,
-) -> Result<ServerSyncStateResponse> {
+    diffs: Vec<sync::Diff>,
+    mut client: HarmonicClient<T>,
+) -> Result<ServerSyncStateResponse>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Send + 'static,
+    T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    T::ResponseBody: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
+    <T::ResponseBody as tonic::codegen::Body>::Error:
+        Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+{
     let request = tonic::Request::new(ClientSyncState {
         sync_uuid: sync_uuid.to_string(),
         timestamp_last_sync_micro: last_sync_timestamp,
@@ -154,12 +175,20 @@ fn handle_response(response: ServerSyncStateResponse) -> Vec<PathBuf> {
         .collect()
 }
 
-async fn send_data_to_server(
-    mut client: HarmonicClient<Channel>,
+#[instrument(fields(sync_uuid = %sync_uuid))]
+async fn send_data_to_server<T: Debug>(
+    mut client: HarmonicClient<T>,
     files: Vec<PathBuf>,
     sync_uuid: &Uuid,
     sync_path: PathBuf,
-) -> Result<()> {
+) -> Result<()>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Send + 'static,
+    T::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    T::ResponseBody: tonic::codegen::Body<Data = tonic::codegen::Bytes> + Send + 'static,
+    <T::ResponseBody as tonic::codegen::Body>::Error:
+        Into<Box<dyn std::error::Error + Send + Sync>> + Send,
+{
     let (tx, rx) = tokio::sync::mpsc::channel(10);
     let out = tokio_stream::wrappers::ReceiverStream::new(rx);
     let mut request = tonic::Request::new(out);
@@ -180,7 +209,8 @@ async fn send_data_to_server(
         if let Err(e) = create_send_task(files, &sync_path, tx).await {
             error!("Send task failed: {:#}", e);
         };
-    });
+    })
+    .instrument(Span::current());
 
     let mut cur_file: String = Default::default();
     let mut file_currently_writing: Option<File> = None;
@@ -192,7 +222,7 @@ async fn send_data_to_server(
 
                 if file_currently_writing.is_none() || cur_file != path {
                     file_currently_writing = Some(
-                        common::get_file(&msg, &sync_path_receiver)
+                        sync::get_file(&msg, &sync_path_receiver)
                             .await
                             .context("Unable to get file to write to")?,
                     );
@@ -200,8 +230,16 @@ async fn send_data_to_server(
                 }
 
                 match file_currently_writing.as_mut() {
-                    Some(f) => common::write_data_to_offset(msg, f).await.context("Failed to write data to offset")?,
-                    None => return Err(HarmonicError::Io(std::io::Error::new(ErrorKind::Other, "Unable to get mutable file to write to")).into())
+                    Some(f) => sync::write_data_to_offset(msg, f)
+                        .await
+                        .context("Failed to write data to offset")?,
+                    None => {
+                        return Err(HarmonicError::Io(std::io::Error::new(
+                            ErrorKind::Other,
+                            "Unable to get mutable file to write to",
+                        ))
+                        .into());
+                    }
                 }
             }
             Err(e) => {
@@ -222,7 +260,7 @@ async fn create_send_task(
     tx: Sender<FileSync>,
 ) -> Result<()> {
     for f in files {
-        let stream = common::file_to_chunked_file_sync(&f, sync_path);
+        let stream = sync::file_to_chunked_file_sync(&f, sync_path);
         pin_mut!(stream);
         while let Some(file_sync) = stream.next().await {
             let file_sync = file_sync.context("Could not unpack FileSync from Stream")?;
@@ -246,14 +284,16 @@ async fn create_send_task(
     Ok(())
 }
 
-fn start_watcher(p: PathBuf, config: &common::Config) -> JoinHandle<()> {
+#[instrument]
+fn start_watcher(p: PathBuf, config: &sync::Config) -> Instrumented<JoinHandle<()>> {
+    info!("Starting file system watcher");
     let c = config.clone();
     tokio::spawn(async move {
-        let (_watcher, mut rx) = match watcher::async_watch(p).await {
+        let (_watcher, mut rx) = match async_watch(p).await {
             Ok((w, rx)) => (w, rx),
             Err(e) => {
                 error!("Error in creating file watcher: {:#}", e);
-                return
+                return;
             }
         };
 
@@ -268,10 +308,10 @@ fn start_watcher(p: PathBuf, config: &common::Config) -> JoinHandle<()> {
             }
         }
     })
+    .instrument(Span::current())
 }
 
-
-fn calculate_change_score(event_kind: EventKind, config: &common::Config) -> u64 {
+fn calculate_change_score(event_kind: EventKind, config: &sync::Config) -> u64 {
     match event_kind {
         EventKind::Modify(_) => config.modify_weight,
         EventKind::Remove(_) => config.remove_weight,
@@ -283,12 +323,13 @@ fn calculate_change_score(event_kind: EventKind, config: &common::Config) -> u64
     }
 }
 
-fn should_trigger_sync(score: u64, config: &common::Config) -> bool {
+fn should_trigger_sync(score: u64, config: &sync::Config) -> bool {
     score > config.sync_threshold
 }
 
 #[cfg(feature = "schedule-based")]
-fn start_scheduler(config: &common::Config) -> JoinHandle<()> {
+fn start_scheduler(config: &sync::Config) -> Instrumented<JoinHandle<()>> {
+    debug!("Starting scheduler");
     let mut delay_interval =
         tokio::time::interval(tokio::time::Duration::from_secs(config.schedule_delay));
     tokio::spawn(async move {
@@ -297,11 +338,12 @@ fn start_scheduler(config: &common::Config) -> JoinHandle<()> {
             delay_interval.tick().await;
         }
     })
+    .instrument(Span::current())
 }
 
 #[cfg(test)]
 mod tests {
-    use harmonic::harmonic::FileAction;
+    use harmonic::proto::FileAction;
 
     use super::*;
 
@@ -425,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_calculate_change_score() {
-        let config = common::Config::default();
+        let config = sync::Config::default();
 
         assert_eq!(
             calculate_change_score(EventKind::Modify(notify::event::ModifyKind::Any), &config),
@@ -447,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_should_trigger_sync() {
-        let config = common::Config::default();
+        let config = sync::Config::default();
 
         assert!(!should_trigger_sync(config.sync_threshold, &config));
         assert!(should_trigger_sync(config.sync_threshold + 1, &config));
