@@ -80,7 +80,7 @@ async fn trigger_sync_task() -> Instrumented<JoinHandle<()>> {
 async fn run_sync() -> Result<()> {
     debug!("Starting sync execution");
     let sync_uuid = Uuid::new_v4();
-    tracing::Span::current().record("sync-uuid", tracing::field::display(&sync_uuid));
+    tracing::Span::current().record("sync_uuid", tracing::field::display(&sync_uuid));
     let config = sync::load_config().context("Failed to load config")?;
     let channel = Channel::builder(
         config
