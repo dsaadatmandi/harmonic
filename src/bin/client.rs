@@ -48,6 +48,9 @@ async fn main() -> Result<()> {
     #[cfg(feature = "schedule-based")]
     let _scheduler_task = start_scheduler(&config);
 
+    #[cfg(feature = "manual-only")]
+    let _sync_task = trigger_sync_task();
+
     let mut queue_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(
         QUEUE_CHECK_SEC_INTERVAL_SEC,
     ));
@@ -92,6 +95,8 @@ async fn run_sync() -> Result<()> {
     .await
     .context("Unable to connect")?;
     let client = HarmonicClient::with_interceptor(channel, send_trace);
+    
+    #[cfg(feature = "compression-zstd")]
     let client = client
         .send_compressed(CompressionEncoding::Zstd)
         .accept_compressed(CompressionEncoding::Zstd);

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use path_clean::PathClean;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncReadExt;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -8,8 +9,26 @@ use tracing::{debug, info, instrument};
 use crate::proto::FileSync;
 use crate::utils::{HarmonicError, Result};
 
-fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> PathBuf {
-    sync_path.join(relative_path)
+fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> Result<PathBuf> {
+    if relative_path.is_absolute() {
+        return Err(HarmonicError::PathError { path: relative_path.to_path_buf() })
+    }
+    
+    let cleaned = relative_path.clean();
+    
+    if cleaned.starts_with("..") {
+        return Err(HarmonicError::PathError { path: relative_path.to_path_buf() })
+    }
+
+    let abs = sync_path.join(cleaned);
+    if !abs.starts_with(sync_path) {
+         return Err(HarmonicError::PathIntegrityError { 
+             path: abs, 
+             sync_path: sync_path.to_path_buf() 
+         })
+    }
+
+    Ok(abs)
 }
 
 pub async fn write_data_to_offset(data: FileSync, file: &mut File) -> Result<()> {
@@ -22,7 +41,7 @@ pub async fn write_data_to_offset(data: FileSync, file: &mut File) -> Result<()>
 
 pub async fn get_file(data: &FileSync, sync_path: &Path) -> Result<File> {
     let relative_path = PathBuf::from(&data.path);
-    let absolute_path = get_absolute_path(&relative_path, sync_path);
+    let absolute_path = get_absolute_path(&relative_path, sync_path)?;
 
     if let Some(parent_path) = absolute_path.parent() {
         tokio::fs::create_dir_all(parent_path).await?;
@@ -48,6 +67,8 @@ pub fn file_to_chunked_file_sync(
 
     debug!(?absolute_path, "Writing to file");
     async_stream::stream! {
+        let absolute_path = absolute_path?;
+
         let mut file = match tokio::fs::File::open(&absolute_path).await {
             Ok(f) => f,
             Err(e) => {
@@ -98,5 +119,25 @@ pub fn file_to_chunked_file_sync(
         }
         info!(%path_str, "Completed yielding chunks for file");
 
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_absolute_path_traversal() {
+        let sync_path = PathBuf::from("/tmp/sync");
+        
+        // Abs path traversal
+        let malicious_abs = PathBuf::from("/etc/passwd");
+        let result_abs = get_absolute_path(&malicious_abs, &sync_path);
+        assert!(result_abs.is_err(), "Absolute path traversal should fail!");
+
+        // Rel path traversal
+        let malicious_rel = PathBuf::from("../../etc/passwd");
+        let result_rel = get_absolute_path(&malicious_rel, &sync_path);
+        assert!(result_rel.is_err(), "Relative path traversal should fail!");
     }
 }

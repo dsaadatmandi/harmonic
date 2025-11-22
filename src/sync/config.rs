@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::exit;
-use std::{fs};
 use std::str::FromStr;
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 use tracing_core::Level;
 
 use crate::utils::{HarmonicError, Result};
@@ -25,7 +25,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            sync_path: PathBuf::from("/Users/milad/harmonic"),
+            sync_path: PathBuf::from(
+                dirs::home_dir().expect("Determination of home dir should never fail"),
+            ),
             socket_addr: String::from("[::1]:42069"),
             schedule_delay: 3600,
             log_level: String::from("info"),
@@ -89,8 +91,8 @@ pub fn load_config() -> Result<Config> {
 
     if let Err(_) = Level::from_str(&config.log_level) {
         error!("Config level was not a valid selection of: trace, debug, info, warn, error");
-        return Err(HarmonicError::ConfigError)
-    }; 
+        return Err(HarmonicError::ConfigError);
+    };
 
     Ok(config)
 }

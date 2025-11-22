@@ -13,6 +13,8 @@ use tokio::fs::File;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+#[cfg(feature = "compression-zstd")]
+use tonic::codec::CompressionEncoding;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
@@ -223,13 +225,21 @@ async fn main() -> Result<()> {
         config,
     };
 
+    let service = HarmonicServer::new(harmonic);
+
+    #[cfg(feature = "compression-zstd")]
+    let service = service
+    .send_compressed(CompressionEncoding::Zstd)
+    .accept_compressed(CompressionEncoding::Zstd);
+
+
     let app = Server::builder()
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_grpc().make_span_with(make_span))
                 .map_request(accept_trace),
         )
-        .add_service(HarmonicServer::new(harmonic))
+        .add_service(service)
         .serve(address);
 
     info!("Server started");
