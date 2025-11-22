@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["event-based", "schedule-based", "trace-stdout"]
+default = ["event-based", "schedule-based", "trace-stdout", "compression-zstd"]
 event-based = []
 schedule-based = []
 manual-only = []
 trace-stdout = []
+compression-zstd = []
 
 [[bin]]
 name = "harmonic-server"
