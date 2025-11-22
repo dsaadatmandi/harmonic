@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["event-based", "schedule-based", "trace-stdout"]
+default = ["event-based", "schedule-based", "trace-stdout", "compression-zstd"]
 event-based = []
 schedule-based = []
 manual-only = []
 trace-stdout = []
+compression-zstd = []
 
 [[bin]]
 name = "harmonic-server"
@@ -54,6 +55,7 @@ tracing-serde = "0.2.0"
 tracing-core = "0.1.34"
 opentelemetry_sdk = "0.31.0"
 opentelemetry-stdout = "0.31.0"
+path-clean = "1.0.1"
 
 [dev-dependencies]
 tempfile = "3.23.0"
