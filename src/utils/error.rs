@@ -36,7 +36,10 @@ pub enum HarmonicError {
     SystemTime(#[from] std::time::SystemTimeError),
 
     #[error("File metadata error: Unable to get metadata for {dir:?}")]
-    FileMetadataError { dir: DirEntry }
+    FileMetadataError { dir: DirEntry },
+
+    #[error("Invalid input parameters")]
+    InvalidInputError,
 }
 
 pub type Result<T> = std::result::Result<T, HarmonicError>;
