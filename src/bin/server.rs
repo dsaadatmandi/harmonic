@@ -7,11 +7,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::prelude::*;
 
-use futures::{StreamExt, pin_mut};
+use futures::{StreamExt};
+use harmonic::Config;
+use harmonic::proto::Delta;
+use harmonic::proto::SyncRequest;
+use harmonic::proto::sync_request;
+use harmonic::sync::transfer::send_block_signatures_for_file;
+use harmonic::sync::transfer::send_delta_from_block_signatures;
+use harmonic::utils::HarmonicError;
 use harmonic::utils::tracing::*;
-use tokio::fs::File;
+use harmonic::utils::writer::delta_writer;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Sender};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 #[cfg(feature = "compression-zstd")]
 use tonic::codec::CompressionEncoding;
@@ -25,7 +33,7 @@ use tonic::{Request, Response, Status, Streaming, transport::Server};
 use uuid::Uuid;
 
 use harmonic::proto::{
-    ClientSyncState, FileAction, FileStatus, FileSync, ServerSyncStateResponse, TransferDirection,
+    ClientSyncState, FileAction, FileStatus, ServerSyncStateResponse, TransferDirection,
     harmonic_server::{Harmonic, HarmonicServer},
 };
 use harmonic::sync::{self, SyncState};
@@ -44,75 +52,9 @@ pub struct HarmonicService {
     config: sync::Config,
 }
 
-#[instrument]
-async fn receive_files_task(
-    mut request_stream: Streaming<FileSync>,
-    sync_path: PathBuf,
-) -> Result<()> {
-    let mut cur_file: String = Default::default();
-    let mut file_currently_writing: Option<File> = None;
-
-    while let Some(request) = request_stream.next().await {
-        match request {
-            Ok(msg) => {
-                let path = msg.path.clone();
-                info!(path, "Received data for file. Writing to path...");
-
-                if file_currently_writing.is_none() || cur_file != path {
-                    file_currently_writing = Some(
-                        sync::get_file(&msg, &sync_path)
-                            .await
-                            .context("Unable to get file to write to")?,
-                    );
-                    cur_file = path;
-                }
-
-                sync::write_data_to_offset(msg, file_currently_writing.as_mut().unwrap())
-                    .await
-                    .context("Failed to write data to file")?;
-            }
-            Err(e) => {
-                error!("Error in response stream from client: {:?}", e);
-                return Err(anyhow::anyhow!("Stream error: {}", e));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[instrument]
-async fn send_files_task(
-    session_state: SessionData,
-    sync_path: PathBuf,
-    tx: mpsc::Sender<Result<FileSync, Status>>,
-) -> Result<()> {
-    debug!("Begin send files task");
-    for action in session_state
-        .sync_plan
-        .iter()
-        .filter(|a| a.direction == TransferDirection::ServerSend as i32)
-    {
-        let path = PathBuf::from(&action.path);
-        let stream = sync::file_to_chunked_file_sync(&path, &sync_path);
-        pin_mut!(stream);
-
-        while let Some(file_sync) = stream.next().await {
-            let file_sync = file_sync.context("Could not unpack FileSync from Stream")?;
-            if tx.send(Ok(file_sync)).await.is_err() {
-                error!("There was an error sending data for file {:?}", path);
-                return Err(anyhow::anyhow!("Failed to send file data for {:?}", path));
-            }
-        }
-    }
-    debug!("Completed send files task");
-
-    Ok(())
-}
-
 #[tonic::async_trait]
 impl Harmonic for HarmonicService {
-    type HarmonizeSynchronizeStateStream = ReceiverStream<Result<FileSync, Status>>;
+    type HarmonizeSyncRequestStream = ReceiverStream<Result<SyncRequest, Status>>;
 
     #[instrument]
     async fn harmonize_client_initiate_sync(
@@ -160,11 +102,11 @@ impl Harmonic for HarmonicService {
     }
 
     #[instrument]
-    async fn harmonize_synchronize_state(
+    async fn harmonize_sync_request(
         &self,
-        request: Request<Streaming<FileSync>>,
-    ) -> Result<Response<Self::HarmonizeSynchronizeStateStream>, Status> {
-        info!("Responding to state sync stream request");
+        request: Request<Streaming<SyncRequest>>,
+    ) -> Result<Response<Self::HarmonizeSyncRequestStream>, Status> {
+        info!("Responding to sync request stream");
         let session_uuid = request
             .metadata()
             .get("session-uuid")
@@ -172,40 +114,105 @@ impl Harmonic for HarmonicService {
             .and_then(|s| Uuid::from_str(s).ok())
             .ok_or_else(|| Status::invalid_argument("Missing session uuid"))?;
 
-        let session_state = self
-            .sync_sessions
+        // check session
+        self.sync_sessions
             .lock()
             .await
             .get(&session_uuid)
-            .cloned()
             .ok_or_else(|| Status::not_found("Session not found"))?;
 
         let request_stream = request.into_inner();
-        let (tx, rx) = mpsc::channel::<Result<FileSync, Status>>(10);
+        let (tx, rx) = mpsc::channel::<Result<SyncRequest, Status>>(10);
 
-        let sync_path_receiver = self.config.sync_path.clone();
-        let sync_path_sender = sync_path_receiver.clone();
-
-        let _receiver_task = tokio::spawn(
-            async move {
-                if let Err(e) = receive_files_task(request_stream, sync_path_receiver).await {
-                    error!("Error in receiver task: {:?}", e);
-                }
-            }
-            .instrument(Span::current()),
-        );
-
-        let _sender_task = tokio::spawn(async move {
-            if let Err(e) = send_files_task(session_state, sync_path_sender, tx).await {
-                error!("Error in sender task: {:?}", e);
-            }
-        })
-        .instrument(Span::current());
-
-        info!("Completed sync.");
+        handle_sync_request_stream(request_stream, tx, self.config.clone())
+            .await
+            .map_err(|e| {
+                error!("Failed to handle sync request stream: {:?}", e);
+                Status::internal(format!("Failed to handle sync request stream: {}", e))
+            })?;
 
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+}
+
+async fn handle_sync_request_stream(
+    mut stream: Streaming<SyncRequest>,
+    tx: Sender<Result<SyncRequest, Status>>,
+    config: Config,
+) -> Result<JoinHandle<Result<()>>> {
+    let handle = tokio::spawn(
+        async move {
+            let mut file_path: PathBuf = Default::default();
+            let mut writer_tx: Option<Sender<Delta>> = Default::default();
+
+            while let Some(sync_request_result) = stream.next().await {
+                match sync_request_result {
+                    Ok(sync_request) => {
+                        let Some(payload) = sync_request.payload else {
+                            debug!("Received SyncRequest with no payload, skipping");
+                            continue;
+                        };
+
+                        if let Err(e) = route_sync_request(
+                            payload,
+                            tx.clone(),
+                            &mut file_path,
+                            config.clone(),
+                            &mut writer_tx,
+                        ).await {
+                            error!("Error routing sync request: {:?}", e);
+                            return Err(anyhow::anyhow!("Failed to route sync request: {}", e));
+                        }
+                    }
+                    Err(status_err) => {
+                        error!("Error receiving sync request from stream: {:?}", status_err);
+                        return Err(anyhow::anyhow!("Stream error: {}", status_err));
+                    }
+                }
+            }
+
+            info!("Sync request stream completed successfully");
+            Ok(())
+        }
+        .instrument(Span::current()),
+    );
+
+    Ok(handle)
+}
+
+async fn route_sync_request(
+    payload: sync_request::Payload,
+    tx: Sender<Result<SyncRequest, Status>>,
+    file_path: &mut PathBuf,
+    config: Config,
+    writer_tx: &mut Option<Sender<Delta>>,
+) -> Result<()> {
+    match payload {
+        sync_request::Payload::FileAction(file_action) => {
+            match file_action.direction {
+                d if d == TransferDirection::ServerRequestFile as i32 => {
+                    *file_path = PathBuf::from(file_action.path);
+                }
+                d if d == TransferDirection::ClientSendFile as i32 => {
+                    let cache = send_block_signatures_for_file(file_path, tx, &config).await?;
+                    *writer_tx = Some(delta_writer(&file_path, cache).await)
+                }
+                _ => {}
+            }
+        },
+        sync_request::Payload::Signatures(signatures) => {
+            send_delta_from_block_signatures(file_path, signatures, tx).await?;
+        },
+        sync_request::Payload::Delta(delta) => {
+            if let Some(tx) = writer_tx {
+                tx.send(delta).await.map_err(|e| HarmonicError::SendError(e.to_string()))?;
+            }
+        },
+        sync_request::Payload::Complete(_complete) => {
+            return Ok(())
+        },
+    }
+    Ok(())
 }
 
 #[tokio::main]

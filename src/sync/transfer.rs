@@ -1,125 +1,151 @@
-use std::path::{Path, PathBuf};
 use path_clean::PathClean;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncReadExt;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio_stream::Stream;
-use tracing::{debug, info, instrument};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use tokio::sync::mpsc::Sender;
+use tonic::{Result as TonicResult, Status};
+use tracing::{info, instrument};
 
-use crate::proto::FileSync;
-use crate::utils::{HarmonicError, Result};
+use crate::Config;
+use crate::proto::{BlockSignatures, Delta, SyncRequest, delta, sync_request};
+use crate::sync::state::{BlockCache, generate_blocks_signatures};
+use crate::utils::{HarmonicError, Result, hash};
 
-fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> Result<PathBuf> {
+pub fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> Result<PathBuf> {
     if relative_path.is_absolute() {
-        return Err(HarmonicError::PathError { path: relative_path.to_path_buf() })
+        return Err(HarmonicError::PathError {
+            path: relative_path.to_path_buf(),
+        });
     }
-    
+
     let cleaned = relative_path.clean();
-    
+
     if cleaned.starts_with("..") {
-        return Err(HarmonicError::PathError { path: relative_path.to_path_buf() })
+        return Err(HarmonicError::PathError {
+            path: relative_path.to_path_buf(),
+        });
     }
 
     let abs = sync_path.join(cleaned);
     if !abs.starts_with(sync_path) {
-         return Err(HarmonicError::PathIntegrityError { 
-             path: abs, 
-             sync_path: sync_path.to_path_buf() 
-         })
+        return Err(HarmonicError::PathIntegrityError {
+            path: abs,
+            sync_path: sync_path.to_path_buf(),
+        });
     }
 
     Ok(abs)
 }
 
-pub async fn write_data_to_offset(data: FileSync, file: &mut File) -> Result<()> {
-    file.seek(std::io::SeekFrom::Start(data.offset)).await?;
+pub async fn send_block_signatures_for_file(
+    file_path: &PathBuf,
+    tx: Sender<TonicResult<SyncRequest, Status>>,
+    config: &Config,
+) -> Result<BlockCache> {
+    // sender always decides block size based on config and sends
+    let (sig, cache) = generate_blocks_signatures(file_path, &config)
+                .await
+                .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+    tx.send(Ok(SyncRequest {
+        payload: Some(sync_request::Payload::Signatures(
+            sig
+        )),
+    }))
+    .await
+    .map_err(|e| HarmonicError::SendError(e.to_string()))?;
 
-    file.write_all(&data.chunk).await?;
-
-    Ok(())
+    Ok(cache)
 }
 
-pub async fn get_file(data: &FileSync, sync_path: &Path) -> Result<File> {
-    let relative_path = PathBuf::from(&data.path);
-    let absolute_path = get_absolute_path(&relative_path, sync_path)?;
+pub async fn send_delta_from_block_signatures(
+    file_path: &PathBuf,
+    block_signatures: BlockSignatures,
+    tx: Sender<TonicResult<SyncRequest, Status>>,
+) -> Result<()> {
+    info!("Generating delta for block signatures");
 
-    if let Some(parent_path) = absolute_path.parent() {
-        tokio::fs::create_dir_all(parent_path).await?;
-    }
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .open(absolute_path)
-        .await?;
-
-    file.set_len(data.file_size).await?;
-
-    Ok(file)
-}
-
-#[instrument]
-pub fn file_to_chunked_file_sync(
-    relative_path: &PathBuf,
-    sync_path: &Path,
-) -> impl Stream<Item = Result<FileSync>> {
-    let absolute_path = get_absolute_path(relative_path, sync_path);
-    let relative_path_c = relative_path.clone();
-
-    debug!(?absolute_path, "Writing to file");
-    async_stream::stream! {
-        let absolute_path = absolute_path?;
-
-        let mut file = match tokio::fs::File::open(&absolute_path).await {
-            Ok(f) => f,
-            Err(e) => {
-                yield Err(HarmonicError::Io(e));
-                return
+    let map: HashMap<u64, HashMap<[u8; 32], u32>> = block_signatures
+        .blocks
+        .iter()
+        .enumerate()
+        .fold(HashMap::new(), |mut acc, (index, b)| {
+            if let Ok(strong) = b.strong_checksum[..].try_into() {
+                acc.entry(b.weak_checksum)
+                    .or_insert_with(HashMap::new)
+                    .insert(strong, index as u32);
             }
-        };
+            acc
+        });
 
-        let file_size = match file.metadata().await {
-            Ok(m) => m.len(),
-            Err(e) => {
-                yield Err(HarmonicError::Io(e));
-                return
-            }
-        };
+    let data = tokio::fs::read(file_path).await?;
+    let mut buffer: Vec<u8> = Vec::new();
+    let block_size = block_signatures.block_size as usize;
 
-        let path_str = match relative_path_c.to_str() {
-            Some(s) => s.to_string(),
-            None => {
-                yield Err(HarmonicError::StringInvalid);
-                return
-            }
-        };
+    let mut i = 0;
 
-        let mut buffer = vec![0u8; 8192];
-        let mut offset = 0;
+    let mut buz_hasher = hash::BuzHash::new(block_size);
+    let data_slice = &data[i..i + block_size];
+    buz_hasher.compute(data_slice);
+    loop {
+        if i + block_size <= data.len() {
+            let data_slice = &data[i..i + block_size];
+            if let Some(strong_checksum) = map.get(&buz_hasher.hash) {
+                let strong_hash = blake3::hash(data_slice);
+                if let Some(index) = strong_checksum.get(strong_hash.as_bytes()) {
+                    if !buffer.is_empty() {
+                        tx.send(Ok(SyncRequest {
+                            payload: Some(sync_request::Payload::Delta(Delta {
+                                index: i as u64,
+                                instruction: Some(delta::Instruction::Literal(buffer.clone())),
+                            })),
+                        }))
+                        .await
+                        .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+                        buffer.clear();
+                    }
 
-        debug!(%path_str, "Begin yielding chunks for file");
+                    tx.send(Ok(SyncRequest {
+                        payload: Some(sync_request::Payload::Delta(Delta {
+                            index: i as u64,
+                            instruction: Some(delta::Instruction::BlockIndex(*index)),
+                        })),
+                    }))
+                    .await
+                    .map_err(|e| HarmonicError::SendError(e.to_string()))?;
 
-        loop {
-            match file.read(&mut buffer).await {
-            Ok(0) => break,
-            Ok(n) => {
-                yield Ok(FileSync {
-                    path: path_str.clone(),
-                    chunk: buffer[..n].to_vec(),
-                    offset: offset,
-                    is_final: false,
-                    file_size: file_size,
-                });
-                offset += n as u64;
-            },
-            Err(e) => {
-                yield Err(HarmonicError::Io(e));
-                return
-            }
+                    i += block_size;
+                    if i + block_size <= data.len() {
+                        buz_hasher.compute(&data[i..i + block_size]);
+                    }
+
+                    continue;
+                }
             }
         }
-        info!(%path_str, "Completed yielding chunks for file");
 
+        if i >= data.len() {
+            break;
+        }
+
+        buffer.push(data[i]);
+        i += 1;
+
+        if i + block_size <= data.len() {
+            buz_hasher.roll(data[i + block_size - 1]);
+        }
     }
+
+    if !buffer.is_empty() {
+        tx.send(Ok(SyncRequest {
+            payload: Some(sync_request::Payload::Delta(Delta {
+                index: i as u64,
+                instruction: Some(delta::Instruction::Literal(buffer)),
+            })),
+        }))
+        .await
+        .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -129,7 +155,7 @@ mod tests {
     #[test]
     fn test_get_absolute_path_traversal() {
         let sync_path = PathBuf::from("/tmp/sync");
-        
+
         // Abs path traversal
         let malicious_abs = PathBuf::from("/etc/passwd");
         let result_abs = get_absolute_path(&malicious_abs, &sync_path);
@@ -139,5 +165,45 @@ mod tests {
         let malicious_rel = PathBuf::from("../../etc/passwd");
         let result_rel = get_absolute_path(&malicious_rel, &sync_path);
         assert!(result_rel.is_err(), "Relative path traversal should fail!");
+    }
+
+    #[tokio::test]
+    async fn test_generate_delta_panic_repro() {
+        use crate::proto::{BlockSignature, BlockSignatures};
+        use std::io::Write;
+        use tokio::sync::mpsc;
+
+        // Create a temp file
+        let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+        let block_size = 4;
+        // Data len 9. Block size 4.
+        // Block 1: [0, 1, 2, 3]
+        // Block 2: [4, 5, 6, 7]
+        // Tail: [8]
+        let data: Vec<u8> = vec![0, 1, 2, 3, 4, 5, 6, 7, 8];
+        temp_file.write_all(&data).unwrap();
+        let file_path = temp_file.path().to_path_buf();
+
+        // Create block signatures that match the second block [4, 5, 6, 7]
+        let mut buz_hasher = crate::utils::hash::BuzHash::new(block_size);
+        let weak = buz_hasher.compute(&data[4..8]);
+        let strong = blake3::hash(&data[4..8]);
+
+        let block_sig = BlockSignature {
+            weak_checksum: weak,
+            strong_checksum: strong.as_bytes().to_vec(),
+        };
+
+        let signatures = BlockSignatures {
+            block_size: block_size as u64,
+            blocks: vec![block_sig],
+        };
+
+        let (tx, _rx) = mpsc::channel(10);
+
+        // This should panic if the bug exists
+        let result = send_delta_from_block_signatures(&file_path, signatures, tx).await;
+
+        assert!(result.is_ok());
     }
 }

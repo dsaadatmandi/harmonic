@@ -1,15 +1,19 @@
 use chrono::prelude::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-use std::{fs};
 use tracing::{debug, info, instrument, warn};
 use walkdir::WalkDir;
 
-use crate::proto::{FileAction, FileStatus, FileType, TransferDirection};
-use crate::utils::{HarmonicError, Result};
+use crate::Config;
+use crate::proto::{
+    BlockSignature, BlockSignatures, FileAction, FileStatus, FileType, TransferDirection,
+};
+use crate::sync::transfer::get_absolute_path;
+use crate::utils::{BuzHash, HarmonicError, Result};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SyncState {
@@ -37,6 +41,10 @@ pub enum ChangeType {
     Added,
     Removed,
     Modified,
+}
+
+pub struct BlockCache {
+    pub blocks: Vec<Box<[u8]>>,
 }
 
 impl TryFrom<Diff> for FileStatus {
@@ -126,7 +134,11 @@ pub fn generate_state(root_path: &PathBuf) -> Result<SyncState> {
         let metadata = FileMetadata::new(absolute_path);
 
         let relative_path = get_relative_path(absolute_path, root_path)?;
-        debug!(?relative_path, ?absolute_path, "Inserted metadata for absolute path with relative path key");
+        debug!(
+            ?relative_path,
+            ?absolute_path,
+            "Inserted metadata for absolute path with relative path key"
+        );
         file_tree.insert(relative_path, metadata?);
     }
 
@@ -226,9 +238,9 @@ pub fn generate_sync_plan(
         let direction: TransferDirection = match (local, remote) {
             (Some(local_file), Some(remote_file)) if remote_file.hash != local_file.hash => {
                 if local_file.modified_ts > remote_file.timestamp_micro {
-                    TransferDirection::ServerSend
+                    TransferDirection::ServerRequestFile
                 } else if remote_file.timestamp_micro > local_file.modified_ts {
-                    TransferDirection::ClientSend
+                    TransferDirection::ClientSendFile
                 } else {
                     warn!(
                         ?path,
@@ -240,12 +252,12 @@ pub fn generate_sync_plan(
             (Some(_), None) => {
                 debug!(?path, "File present on client but not on server");
                 // TODO implement deleted file logic
-                TransferDirection::ServerSend
+                TransferDirection::ServerRequestFile
             }
             (None, Some(_)) => {
                 debug!(?path, "File present on server but not on client");
                 // TODO implement deleted file logic
-                TransferDirection::ClientSend
+                TransferDirection::ClientSendFile
             }
             (None, None) => unreachable!(),
             _ => TransferDirection::Skip,
@@ -262,6 +274,34 @@ pub fn generate_sync_plan(
     info!("Completed generating sync plan");
 
     Ok(sync_plan)
+}
+
+pub async fn generate_blocks_signatures(
+    file_path: &PathBuf,
+    config: &Config,
+) -> Result<(BlockSignatures, BlockCache)> {
+    info!("Generating block signatures");
+    let mut cache = BlockCache { blocks: vec![] };
+
+    let data = tokio::fs::read(get_absolute_path(&file_path, &config.sync_path)?).await?;
+    let mut bs: Vec<BlockSignature> = Vec::new();
+    let mut buz_hasher = BuzHash::new(config.block_size as usize);
+
+    for c in data.chunks(config.block_size as usize) {
+        cache.blocks.push(c.into());
+        bs.push(BlockSignature {
+            weak_checksum: buz_hasher.compute(c),
+            strong_checksum: blake3::hash(c).as_bytes().to_vec(),
+        });
+    }
+
+    Ok((
+        BlockSignatures {
+            block_size: config.block_size,
+            blocks: bs,
+        },
+        cache,
+    ))
 }
 
 #[cfg(test)]
@@ -459,7 +499,7 @@ mod tests {
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
-        assert_eq!(plan[0].direction, TransferDirection::ServerSend as i32);
+        assert_eq!(plan[0].direction, TransferDirection::ServerRequestFile as i32);
     }
 
     #[test]
@@ -489,7 +529,7 @@ mod tests {
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
-        assert_eq!(plan[0].direction, TransferDirection::ClientSend as i32);
+        assert_eq!(plan[0].direction, TransferDirection::ClientSendFile as i32);
     }
 
     #[test]

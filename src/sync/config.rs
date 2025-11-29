@@ -20,6 +20,8 @@ pub struct Config {
     pub modify_weight: u64,
     pub remove_weight: u64,
     pub create_weight: u64,
+
+    pub block_size: u64,
 }
 
 impl Default for Config {
@@ -35,6 +37,7 @@ impl Default for Config {
             modify_weight: 2,
             remove_weight: 5,
             create_weight: 10,
+            block_size: 8192,
         }
     }
 }
@@ -133,6 +136,7 @@ mod tests {
             modify_weight: 2,
             remove_weight: 5,
             create_weight: 10,
+            block_size: 8192,
         };
 
         let uri = config.server_uri();
@@ -154,6 +158,7 @@ mod tests {
             modify_weight: 2,
             remove_weight: 5,
             create_weight: 10,
+            block_size: 8192,
         };
 
         let uri = config.server_uri();
@@ -175,6 +180,7 @@ mod tests {
             modify_weight: 2,
             remove_weight: 5,
             create_weight: 10,
+            block_size: 8192,
         };
 
         let uri = config.server_uri();
@@ -196,6 +202,7 @@ mod tests {
             modify_weight: 2,
             remove_weight: 5,
             create_weight: 10,
+            block_size: 8192,
         };
 
         let uri = config.server_uri();
