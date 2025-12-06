@@ -51,7 +51,7 @@ impl Config {
 fn config_dir_path() -> Result<PathBuf> {
     // let mut path = dirs::config_dir().ok_or(HarmonicError::ConfigError)?;
     let mut path = PathBuf::from(".");
-    path.push("harmonic");
+    path.push(".harmonic");
 
     debug!(?path, "Config path");
     Ok(path)
@@ -116,13 +116,13 @@ mod tests {
     #[test]
     fn test_config_dir_path() {
         let path = config_dir_path().unwrap();
-        assert!(path.ends_with("harmonic"));
+        assert!(path.ends_with(".harmonic"));
     }
 
     #[test]
     fn test_config_file_path() {
         let path = config_file_path().unwrap();
-        assert!(path.ends_with("harmonic/config.toml"));
+        assert!(path.ends_with(".harmonic/config.toml"));
     }
 
     #[test]

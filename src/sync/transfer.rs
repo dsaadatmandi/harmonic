@@ -1,8 +1,6 @@
 use path_clean::PathClean;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::mpsc::Sender;
-use tonic::{Result as TonicResult, Status};
 use tracing::{info, instrument};
 
 use crate::Config;
@@ -36,31 +34,38 @@ pub fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> Result<PathB
     Ok(abs)
 }
 
-pub async fn send_block_signatures_for_file(
+use futures::{Sink, SinkExt};
+
+#[instrument(skip(tx, config), fields(file_path = %file_path.display()))]
+pub async fn send_block_signatures_for_file<S>(
     file_path: &PathBuf,
-    tx: Sender<TonicResult<SyncRequest, Status>>,
+    tx: &mut S,
     config: &Config,
-) -> Result<BlockCache> {
+) -> Result<BlockCache>
+where
+    S: Sink<SyncRequest, Error = HarmonicError> + Unpin + Send,
+{
     // sender always decides block size based on config and sends
     let (sig, cache) = generate_blocks_signatures(file_path, &config)
-                .await
-                .map_err(|e| HarmonicError::SendError(e.to_string()))?;
-    tx.send(Ok(SyncRequest {
-        payload: Some(sync_request::Payload::Signatures(
-            sig
-        )),
-    }))
-    .await
-    .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+        .await
+        .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+    tx.send(SyncRequest {
+        payload: Some(sync_request::Payload::Signatures(sig)),
+    })
+    .await?;
 
     Ok(cache)
 }
 
-pub async fn send_delta_from_block_signatures(
+#[instrument(skip(tx, block_signatures), fields(file_path = %file_path.display(), num_blocks = block_signatures.blocks.len()))]
+pub async fn send_delta_from_block_signatures<S>(
     file_path: &PathBuf,
     block_signatures: BlockSignatures,
-    tx: Sender<TonicResult<SyncRequest, Status>>,
-) -> Result<()> {
+    tx: &mut S,
+) -> Result<()>
+where
+    S: Sink<SyncRequest, Error = HarmonicError> + Unpin + Send,
+{
     info!("Generating delta for block signatures");
 
     let map: HashMap<u64, HashMap<[u8; 32], u32>> = block_signatures
@@ -78,13 +83,22 @@ pub async fn send_delta_from_block_signatures(
 
     let data = tokio::fs::read(file_path).await?;
     let mut buffer: Vec<u8> = Vec::new();
+    let mut buffer_start_index: u64 = 0;
     let block_size = block_signatures.block_size as usize;
 
     let mut i = 0;
 
     let mut buz_hasher = hash::BuzHash::new(block_size);
-    let data_slice = &data[i..i + block_size];
+    let data_slice: &[u8];
+    if block_size >= data.len() {
+        data_slice = &data;
+    } else {
+        data_slice = &data[0..block_size];
+    }
     buz_hasher.compute(data_slice);
+
+    info!("Starting loop to generate deltas from block signatures");
+
     loop {
         if i + block_size <= data.len() {
             let data_slice = &data[i..i + block_size];
@@ -92,25 +106,23 @@ pub async fn send_delta_from_block_signatures(
                 let strong_hash = blake3::hash(data_slice);
                 if let Some(index) = strong_checksum.get(strong_hash.as_bytes()) {
                     if !buffer.is_empty() {
-                        tx.send(Ok(SyncRequest {
+                        tx.send(SyncRequest {
                             payload: Some(sync_request::Payload::Delta(Delta {
-                                index: i as u64,
+                                index: buffer_start_index,
                                 instruction: Some(delta::Instruction::Literal(buffer.clone())),
                             })),
-                        }))
-                        .await
-                        .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+                        })
+                        .await?;
                         buffer.clear();
                     }
 
-                    tx.send(Ok(SyncRequest {
+                    tx.send(SyncRequest {
                         payload: Some(sync_request::Payload::Delta(Delta {
                             index: i as u64,
                             instruction: Some(delta::Instruction::BlockIndex(*index)),
                         })),
-                    }))
-                    .await
-                    .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+                    })
+                    .await?;
 
                     i += block_size;
                     if i + block_size <= data.len() {
@@ -126,6 +138,11 @@ pub async fn send_delta_from_block_signatures(
             break;
         }
 
+        // If buffer is empty, record where this literal sequence starts
+        if buffer.is_empty() {
+            buffer_start_index = i as u64;
+        }
+
         buffer.push(data[i]);
         i += 1;
 
@@ -135,16 +152,21 @@ pub async fn send_delta_from_block_signatures(
     }
 
     if !buffer.is_empty() {
-        tx.send(Ok(SyncRequest {
+        tx.send(SyncRequest {
             payload: Some(sync_request::Payload::Delta(Delta {
-                index: i as u64,
+                index: buffer_start_index,
                 instruction: Some(delta::Instruction::Literal(buffer)),
             })),
-        }))
-        .await
-        .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+        })
+        .await?;
     }
 
+    info!("Completed sending deltas for block signatures");
+
+    tx.send(SyncRequest {
+        payload: Some(sync_request::Payload::Complete(true)),
+    })
+    .await?;
     Ok(())
 }
 
@@ -171,7 +193,6 @@ mod tests {
     async fn test_generate_delta_panic_repro() {
         use crate::proto::{BlockSignature, BlockSignatures};
         use std::io::Write;
-        use tokio::sync::mpsc;
 
         // Create a temp file
         let mut temp_file = tempfile::NamedTempFile::new().unwrap();
@@ -199,10 +220,11 @@ mod tests {
             blocks: vec![block_sig],
         };
 
-        let (tx, _rx) = mpsc::channel(10);
+        let (tx, _rx) = futures::channel::mpsc::channel(10);
+        let mut sink = tx.sink_map_err(|e| HarmonicError::SendError(e.to_string()));
 
         // This should panic if the bug exists
-        let result = send_delta_from_block_signatures(&file_path, signatures, tx).await;
+        let result = send_delta_from_block_signatures(&file_path, signatures, &mut sink).await;
 
         assert!(result.is_ok());
     }

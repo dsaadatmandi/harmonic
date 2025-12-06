@@ -1,10 +1,11 @@
 use chrono::prelude::Utc;
+use prost_types::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+use std::{default, fs};
 use tracing::{debug, info, instrument, warn};
 use walkdir::WalkDir;
 
@@ -18,13 +19,35 @@ use crate::utils::{BuzHash, HarmonicError, Result};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SyncState {
     pub last_sync_timestamp_micros: i64,
-    tree: BTreeMap<PathBuf, FileMetadata>,
+    pub tree: BTreeMap<PathBuf, FileMetadata>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-struct FileMetadata {
-    hash: [u8; 32],
-    modified_ts: i64,
+pub struct FileMetadata {
+    pub hash: [u8; 32],
+    #[serde(with = "timestamp_proto")]
+    pub modified_ts: prost_types::Timestamp,
+}
+
+// serde timestamp from claude, lets see if this works ok
+mod timestamp_proto {
+    use prost_types::Timestamp;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(ts: &Timestamp, s: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        let micros = ts.seconds * 1_000_000 + (ts.nanos / 1_000) as i64;
+        s.serialize_i64(micros)
+    }
+
+    pub fn deserialize<'de, D>(d: D) -> Result<Timestamp, D::Error>
+    where D: Deserializer<'de> {
+        let micros = i64::deserialize(d)?;
+        Ok(Timestamp {
+            seconds: micros / 1_000_000,
+            nanos: ((micros % 1_000_000) * 1_000) as i32,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -32,7 +55,7 @@ pub struct Diff {
     path: PathBuf,
     pub change: ChangeType,
     hash: [u8; 32],
-    modified_ts: i64,
+    modified_ts: prost_types::Timestamp,
 }
 
 #[derive(Debug)]
@@ -57,7 +80,7 @@ impl TryFrom<Diff> for FileStatus {
                 .to_str()
                 .ok_or(HarmonicError::StringInvalid)?
                 .to_string(),
-            timestamp_micro: diff.modified_ts,
+            timestamp: Some(diff.modified_ts),
             file_type: FileType::Other.into(),
             hash: diff.hash.to_vec(),
         })
@@ -72,15 +95,23 @@ impl FileMetadata {
         let hash: [u8; 32] = *hash.as_bytes();
         let modified_systime = fs::metadata(&path)?.modified()?;
 
-        let modified_ts = modified_systime.duration_since(UNIX_EPOCH)?.as_micros() as i64;
+        let d = modified_systime.duration_since(UNIX_EPOCH)?;
+        let timestamp = prost_types::Timestamp {
+            seconds: d.as_secs() as i64,
+            nanos: d.subsec_nanos() as i32,
+        };
 
-        Ok(Self { hash, modified_ts })
+        Ok(Self { hash, modified_ts: timestamp })
     }
 }
 
+fn proto_timestamp_gt(a: prost_types::Timestamp, b: prost_types::Timestamp) -> bool {
+    return (a.seconds, a.nanos) > (b.seconds, b.nanos)
+}
+
 fn state_file_path() -> Result<PathBuf> {
-    let mut path = dirs::config_dir().ok_or(HarmonicError::ConfigError)?;
-    path.push("harmonic");
+    let mut path = PathBuf::from(".");
+    path.push(".harmonic");
     path.push("state.json");
 
     Ok(path)
@@ -120,7 +151,7 @@ pub fn load_state() -> Result<SyncState> {
     }
 }
 
-pub fn generate_state(root_path: &PathBuf) -> Result<SyncState> {
+pub fn generate_state(root_path: &PathBuf, ignore_hidden: bool) -> Result<SyncState> {
     debug!("Generating current sync state");
     let mut file_tree: BTreeMap<PathBuf, FileMetadata> = BTreeMap::new();
 
@@ -128,6 +159,7 @@ pub fn generate_state(root_path: &PathBuf) -> Result<SyncState> {
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
+        .filter(|p| if ignore_hidden {!has_hidden_components(p.path())} else {true})
     {
         let absolute_path = file.path();
         debug!(?absolute_path, "Getting metadata for path");
@@ -148,7 +180,12 @@ pub fn generate_state(root_path: &PathBuf) -> Result<SyncState> {
     })
 }
 
-#[instrument]
+fn has_hidden_components(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with(".")))
+}
+
+#[instrument(skip(before_state, now_state), fields(before_count = before_state.tree.len(), now_count = now_state.tree.len()))]
 pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Diff> {
     info!("Begin computing difference between current state with previous sync state");
 
@@ -158,6 +195,7 @@ pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Di
         .tree
         .keys()
         .chain(now_state.tree.keys())
+        .filter(|p| !has_hidden_components(p))
         .collect();
 
     for path in all_paths {
@@ -166,7 +204,7 @@ pub fn compare_states(before_state: &SyncState, now_state: &SyncState) -> Vec<Di
 
         match (now, before) {
             (Some(now_meta), Some(before_meta)) if now_meta.hash != before_meta.hash => {
-                let (hs, mts) = if now_meta.modified_ts > before_meta.modified_ts {
+                let (hs, mts) = if proto_timestamp_gt(now_meta.modified_ts, before_meta.modified_ts) {
                     (now_meta.hash, now_meta.modified_ts)
                 } else {
                     (before_meta.hash, before_meta.modified_ts)
@@ -209,7 +247,7 @@ pub fn file_status_vec_to_tree(file_status_vec: Vec<FileStatus>) -> BTreeMap<Pat
     tree
 }
 
-#[instrument]
+#[instrument(skip(state_now, remote_files), fields(local_count = state_now.tree.len(), remote_count = remote_files.len()))]
 pub fn generate_sync_plan(
     state_now: &SyncState,
     remote_files: &Vec<FileStatus>,
@@ -234,30 +272,37 @@ pub fn generate_sync_plan(
     for path in all_paths {
         let local = state_now.tree.get(path);
         let remote = remote_tree.get(path);
+        let mut latest_timestamp: prost_types::Timestamp = Default::default();
 
         let direction: TransferDirection = match (local, remote) {
             (Some(local_file), Some(remote_file)) if remote_file.hash != local_file.hash => {
-                if local_file.modified_ts > remote_file.timestamp_micro {
-                    TransferDirection::ServerRequestFile
-                } else if remote_file.timestamp_micro > local_file.modified_ts {
-                    TransferDirection::ClientSendFile
+                let remote_file_timestamp = remote_file.timestamp.unwrap_or_default();
+                if proto_timestamp_gt(local_file.modified_ts, remote_file_timestamp) {
+                    latest_timestamp = local_file.modified_ts;
+                    TransferDirection::Upload
+                } else if proto_timestamp_gt(remote_file_timestamp, local_file.modified_ts) {
+                    latest_timestamp = remote_file_timestamp;
+                    TransferDirection::Download
                 } else {
                     warn!(
                         ?path,
                         "File hash is different but modified timestamp is identical! Needs investigation"
                     );
+                    latest_timestamp = local_file.modified_ts;
                     TransferDirection::Skip
                 }
             }
-            (Some(_), None) => {
+            (Some(local_file), None) => {
                 debug!(?path, "File present on client but not on server");
                 // TODO implement deleted file logic
-                TransferDirection::ServerRequestFile
+                latest_timestamp = local_file.modified_ts;
+                TransferDirection::Download
             }
-            (None, Some(_)) => {
+            (None, Some(remote_file)) => {
                 debug!(?path, "File present on server but not on client");
                 // TODO implement deleted file logic
-                TransferDirection::ClientSendFile
+                latest_timestamp = remote_file.timestamp.unwrap_or_default();
+                TransferDirection::Upload
             }
             (None, None) => unreachable!(),
             _ => TransferDirection::Skip,
@@ -269,6 +314,7 @@ pub fn generate_sync_plan(
         sync_plan.push(FileAction {
             path: path_str.to_string(),
             direction: direction.into(),
+            timestamp_latest_modified: Some(latest_timestamp),
         });
     }
     info!("Completed generating sync plan");
@@ -283,7 +329,12 @@ pub async fn generate_blocks_signatures(
     info!("Generating block signatures");
     let mut cache = BlockCache { blocks: vec![] };
 
-    let data = tokio::fs::read(get_absolute_path(&file_path, &config.sync_path)?).await?;
+    let abs_path = get_absolute_path(&file_path, &config.sync_path)?;
+    let data = match tokio::fs::read(&abs_path).await {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(HarmonicError::Io(e)),
+    };
     let mut bs: Vec<BlockSignature> = Vec::new();
     let mut buz_hasher = BuzHash::new(config.block_size as usize);
 
@@ -315,7 +366,7 @@ mod tests {
         let file_statuses = vec![
             FileStatus {
                 path: String::from("test1.txt"),
-                timestamp_micro: 123456,
+                timestamp: Some(Timestamp { seconds: 123, nanos: 456000 }),
                 file_type: FileType::Other.into(),
                 hash: vec![
                     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
@@ -324,7 +375,7 @@ mod tests {
             },
             FileStatus {
                 path: String::from("test2.txt"),
-                timestamp_micro: 654321,
+                timestamp: Some(Timestamp { seconds: 654, nanos: 321000 }),
                 file_type: FileType::Other.into(),
                 hash: vec![
                     33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
@@ -364,7 +415,7 @@ mod tests {
             PathBuf::from("new_file.txt"),
             FileMetadata {
                 hash: [1; 32],
-                modified_ts: 2000,
+                modified_ts: Timestamp { seconds: 2000, nanos: 0 },
             },
         );
 
@@ -387,7 +438,7 @@ mod tests {
             PathBuf::from("old_file.txt"),
             FileMetadata {
                 hash: [1; 32],
-                modified_ts: 1000,
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
             },
         );
 
@@ -415,7 +466,7 @@ mod tests {
             PathBuf::from("modified.txt"),
             FileMetadata {
                 hash: [1; 32],
-                modified_ts: 1000,
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
             },
         );
 
@@ -429,7 +480,7 @@ mod tests {
             PathBuf::from("modified.txt"),
             FileMetadata {
                 hash: [2; 32],
-                modified_ts: 2000,
+                modified_ts: Timestamp { seconds: 2000, nanos: 0 },
             },
         );
 
@@ -443,7 +494,7 @@ mod tests {
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].path, PathBuf::from("modified.txt"));
         assert!(matches!(diffs[0].change, ChangeType::Modified));
-        assert_eq!(diffs[0].modified_ts, 2000);
+        assert_eq!(diffs[0].modified_ts, Timestamp { seconds: 2000, nanos: 0 });
     }
 
     #[test]
@@ -453,7 +504,7 @@ mod tests {
             PathBuf::from("unchanged.txt"),
             FileMetadata {
                 hash: [1; 32],
-                modified_ts: 1000,
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
             },
         );
 
@@ -479,7 +530,7 @@ mod tests {
             PathBuf::from("file.txt"),
             FileMetadata {
                 hash: [1; 32],
-                modified_ts: 2000,
+                modified_ts: Timestamp { seconds: 2000, nanos: 0 },
             },
         );
 
@@ -490,7 +541,7 @@ mod tests {
 
         let remote_files = vec![FileStatus {
             path: String::from("file.txt"),
-            timestamp_micro: 1000,
+            timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
             file_type: FileType::Other.into(),
             hash: vec![2; 32],
         }];
@@ -499,7 +550,7 @@ mod tests {
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
-        assert_eq!(plan[0].direction, TransferDirection::ServerRequestFile as i32);
+        assert_eq!(plan[0].direction, TransferDirection::Upload as i32);
     }
 
     #[test]
@@ -509,7 +560,7 @@ mod tests {
             PathBuf::from("file.txt"),
             FileMetadata {
                 hash: [1; 32],
-                modified_ts: 1000,
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
             },
         );
 
@@ -520,7 +571,7 @@ mod tests {
 
         let remote_files = vec![FileStatus {
             path: String::from("file.txt"),
-            timestamp_micro: 2000,
+            timestamp: Some(Timestamp { seconds: 2000, nanos: 0 }),
             file_type: FileType::Other.into(),
             hash: vec![2; 32],
         }];
@@ -529,7 +580,7 @@ mod tests {
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
-        assert_eq!(plan[0].direction, TransferDirection::ClientSendFile as i32);
+        assert_eq!(plan[0].direction, TransferDirection::Download as i32);
     }
 
     #[test]
@@ -539,7 +590,7 @@ mod tests {
             PathBuf::from("file.txt"),
             FileMetadata {
                 hash: [1; 32],
-                modified_ts: 1000,
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
             },
         );
 
@@ -550,7 +601,7 @@ mod tests {
 
         let remote_files = vec![FileStatus {
             path: String::from("file.txt"),
-            timestamp_micro: 1000,
+            timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
             file_type: FileType::Other.into(),
             hash: vec![1; 32],
         }];
@@ -564,7 +615,7 @@ mod tests {
     #[test]
     fn test_state_file_path() {
         let path = state_file_path().unwrap();
-        assert!(path.ends_with("harmonic/state.json"));
+        assert!(path.ends_with(".harmonic/state.json"));
     }
 
     #[test]
@@ -576,13 +627,13 @@ mod tests {
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
                 24, 25, 26, 27, 28, 29, 30, 31, 32,
             ],
-            modified_ts: 123456789,
+            modified_ts: Timestamp { seconds: 123456789, nanos: 0 },
         };
 
         let file_status: FileStatus = FileStatus::try_from(diff).unwrap();
 
         assert_eq!(file_status.path, "test_file.txt");
-        assert_eq!(file_status.timestamp_micro, 123456789);
+        assert_eq!(file_status.timestamp, Some(Timestamp { seconds: 123456789, nanos: 0 }));
         assert_eq!(
             file_status.hash,
             vec![

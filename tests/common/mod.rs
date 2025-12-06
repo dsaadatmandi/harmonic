@@ -12,5 +12,6 @@ pub fn create_test_config(path: &PathBuf) -> Config {
         modify_weight: 2,
         remove_weight: 5,
         create_weight: 10,
+        block_size: 8192,
     }
 }
