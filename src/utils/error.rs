@@ -43,6 +43,9 @@ pub enum HarmonicError {
 
     #[error("gRPC send error: {0}")]
     SendError(String),
+
+    #[error("Crypto error: {0}")]
+    CryptoError(String)
 }
 
 pub type Result<T> = std::result::Result<T, HarmonicError>;
