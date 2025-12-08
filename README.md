@@ -42,13 +42,13 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 
 
 ### On the topic of parallel file writes
-Very difficult to implement asynchronous, platform agnostic parallel file writes to the same file.
-Overview:
-Instructions may come in from other machine since file reads are very fast
-A queue of messages with instructions to write to data to various locations will build up
-Chunks from signature generation are actually cached, available in memory, hence no io limitation
-Although the file api provided by tokio is asynchronous, underlying io operations are not necessarily
-Difficult to implement cross-platform -> do macos and windows support this?
+Very difficult to implement asynchronous, platform agnostic parallel file writes to the same file.  
+Overview:  
+Instructions may come in from other machine since file reads are very fast.  
+A queue of messages with instructions to write to data to various locations will build up.  
+Chunks from signature generation are actually cached, available in memory, hence no io limitation.  
+Although the file api provided by tokio is asynchronous, underlying io operations are not necessarily.  
+Difficult to implement cross-platform -> do macos and windows support this?   
 
 ---
 
