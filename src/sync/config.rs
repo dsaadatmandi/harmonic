@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::exit;
 use std::str::FromStr;
+use std::{fs, io, path};
 use tracing::{debug, error, info};
 use tracing_core::Level;
 
@@ -51,7 +51,7 @@ impl Config {
 fn config_dir_path() -> Result<PathBuf> {
     // let mut path = dirs::config_dir().ok_or(HarmonicError::ConfigError)?;
     let mut path = PathBuf::from(".");
-    path.push("harmonic");
+    path.push(".harmonic");
 
     debug!(?path, "Config path");
     Ok(path)
@@ -84,9 +84,9 @@ pub fn load_config() -> Result<Config> {
         Err(error) => match error.kind() {
             ErrorKind::NotFound => {
                 info!("Config file not found. Creating with default values.");
-                handle_no_config()?;
-                info!("Program will exit now. Please edit default configuration and try again.");
-                exit(0);
+                let c = handle_no_config()?;
+                info!("Config created. Continuing.");
+            Ok(c)
             }
             _ => Err(HarmonicError::Io(error)),
         },
@@ -100,13 +100,41 @@ pub fn load_config() -> Result<Config> {
     Ok(config)
 }
 
-fn handle_no_config() -> Result<()> {
-    let c = Config::default();
-    println!("Saving config to: {:?}", config_dir_path());
-    println!("Please edit config with required values");
-    save_config(c)?;
+fn handle_no_config() -> Result<Config> {
+    let mut path = String::new();
+    let mut address = String::new();
+    println!("No config found! Creating new file...");
+    println!("Please enter the path you would like to Harmonize:\n");
+    io::stdin()
+        .read_line(&mut path)
+        .expect("Failed to read input for path");
 
-    Ok(())
+    // how about this just depends on which binary will be compiled
+    println!(
+        "Please enter the address your server should listen on / your client should connect to:"
+    );
+    println!("Valid formats include: [::1]:PORT, IP:PORT\n");
+    io::stdin()
+        .read_line(&mut address)
+        .expect("Failed to read input for address");
+
+    let c = Config {
+        sync_path: PathBuf::from(path.trim()),
+        socket_addr: address.trim().to_string(),
+        schedule_delay: Default::default(),
+        log_level: Default::default(),
+        sync_threshold: Default::default(),
+        modify_weight: Default::default(),
+        remove_weight: Default::default(),
+        create_weight: Default::default(),
+        block_size: Default::default(),
+    };
+
+    println!("Saving config to: {:?}", config_dir_path());
+    println!("Please review the config file to find additional configurable properties");
+    save_config(c.clone())?;
+
+    Ok(c)
 }
 
 #[cfg(test)]
@@ -116,13 +144,13 @@ mod tests {
     #[test]
     fn test_config_dir_path() {
         let path = config_dir_path().unwrap();
-        assert!(path.ends_with("harmonic"));
+        assert!(path.ends_with(".harmonic"));
     }
 
     #[test]
     fn test_config_file_path() {
         let path = config_file_path().unwrap();
-        assert!(path.ends_with("harmonic/config.toml"));
+        assert!(path.ends_with(".harmonic/config.toml"));
     }
 
     #[test]

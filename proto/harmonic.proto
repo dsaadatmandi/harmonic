@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/timestamp.proto";
+
 package harmonic;
 
 service Harmonic {
@@ -15,8 +17,8 @@ enum FileType {
 
 enum TransferDirection {
   SKIP = 0;
-  SERVER_REQUEST_FILE = 1;
-  CLIENT_SEND_FILE = 2;
+  DOWNLOAD = 1;
+  UPLOAD = 2;
 }
 
 message ClientSyncState {
@@ -27,7 +29,7 @@ message ClientSyncState {
 
 message FileStatus {
   string path = 1;
-  int64 timestamp_micro = 2;
+  google.protobuf.Timestamp timestamp = 2;
   FileType file_type = 3;
   bytes hash = 4;
 }
@@ -41,6 +43,7 @@ message ServerSyncStateResponse {
 message FileAction {
   string path = 1;
   TransferDirection direction = 2;
+  google.protobuf.Timestamp timestamp_latest_modified = 3; 
 }
 
 message SyncRequest {

@@ -6,6 +6,9 @@ use tracing::{Span, debug, info_span, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
 
+#[cfg(feature = "trace-jaeger")]
+use std::sync::OnceLock;
+
 
 struct MetadataInjector<'a>(&'a mut MetadataMap);
 
@@ -51,6 +54,10 @@ pub fn send_trace<T>(mut request: tonic::Request<T>) -> Result<tonic::Request<T>
     Ok(request)
 }
 
+// Store the provider globally so we can shut it down later
+#[cfg(feature = "trace-jaeger")]
+static TRACER_PROVIDER: OnceLock<opentelemetry_sdk::trace::SdkTracerProvider> = OnceLock::new();
+
 pub fn init_tracer() -> Tracer {
     #[cfg(feature = "trace-stdout")]
     {
@@ -74,7 +81,32 @@ pub fn init_tracer() -> Tracer {
 
     #[cfg(feature = "trace-jaeger")]
     {
+        use opentelemetry::{KeyValue, trace::TracerProvider};
+        use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 
+        // Using HTTP endpoint (default port 4318 for OTLP/HTTP)
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .build()
+            .expect("Failed to create Jaeger OTLP exporter");
+
+        let resource = Resource::builder()
+            .with_attribute(KeyValue::new("service.name", "harmonic"))
+            .build();
+
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(resource)
+            .build();
+
+        global::set_tracer_provider(provider.clone());
+
+        let tracer = provider.tracer("harmonic");
+
+        // Store provider for later shutdown
+        let _ = TRACER_PROVIDER.set(provider);
+
+        tracer
     }
 
     #[cfg(not(any(feature = "trace-stdout", feature = "trace-jaeger")))]
@@ -89,9 +121,12 @@ pub fn init_tracing(log_level: &String) {
     let tracer = init_tracer();
 
     let telem_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout);
+
     let subscriber = tracing_subscriber::registry()
     .with(telem_layer)
-    .with(tracing_subscriber::fmt::layer())
+    .with(fmt_layer)
     .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level)));
 
     match tracing::subscriber::set_global_default(subscriber) {
@@ -101,8 +136,37 @@ pub fn init_tracing(log_level: &String) {
 }
 
 pub fn tracing_orchestrator(log_level: &String) {
-    debug!("Setting text map propagator");
     global::set_text_map_propagator(TraceContextPropagator::new());
 
     init_tracing(&log_level);
+
+    debug!("Text map propagator set and tracing initialized");
+
+}
+
+pub async fn shutdown_tracer() {
+    use tracing::info;
+
+    info!("Shutting down tracer...");
+
+    #[cfg(feature = "trace-jaeger")]
+    {
+        if let Some(provider) = TRACER_PROVIDER.get() {
+            // Shutdown the tracer provider in a blocking task
+            // This flushes all pending spans before shutting down
+            if let Err(e) = tokio::task::spawn_blocking(move || {
+                if let Err(err) = provider.shutdown() {
+                    tracing::error!("Provider shutdown error: {:?}", err);
+                }
+            }).await {
+                tracing::error!("Error in shutdown task: {:?}", e);
+            }
+            info!("Tracer shutdown complete");
+        }
+    }
+
+    #[cfg(not(feature = "trace-jaeger"))]
+    {
+        info!("No tracer to shutdown");
+    }
 }

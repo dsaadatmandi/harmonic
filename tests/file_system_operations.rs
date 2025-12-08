@@ -1,9 +1,34 @@
-use futures::pin_mut;
-use harmonic::{sync::*, proto::FileStatus};
+// Harmonic Sync Protocol Tests
+//
+// Protocol Flow Overview:
+//
+// UPLOAD (Client → Server):
+// 1. Client sends FileAction with Upload direction
+// 2. Server receives FileAction, generates and sends Signatures back
+//    (empty signatures if file doesn't exist on server)
+// 3. Server creates delta_writer with block cache to receive deltas
+// 4. Client receives Signatures, calculates Delta from them
+// 5. Client sends Delta message(s) to server
+// 6. Server's delta_writer reconstructs the file from deltas + cached blocks
+// 7. Client sends Complete message when done
+//
+// DOWNLOAD (Server → Client):
+// 1. Client sends FileAction with Download direction
+// 2. Client immediately generates and sends Signatures of its local file
+//    (empty signatures if file doesn't exist locally)
+// 3. Client creates delta_writer with block cache to receive deltas
+// 4. Server receives Signatures, calculates Delta from them
+// 5. Server sends Delta message(s) to client
+// 6. Client's delta_writer reconstructs the file from deltas + cached blocks
+// 7. Server sends Complete message when done
+
+use harmonic::{sync::{*}, proto::{FileStatus, sync_request, FileAction, TransferDirection, Delta}, utils::HarmonicError};
+use harmonic::sync::handler::handle_sync_payload;
 use std::{fs, path::PathBuf};
 use tempfile::tempdir;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_stream::StreamExt;
+use futures::{SinkExt};
+use tokio_util::sync::PollSender;
+use tokio::sync::mpsc;
 
 mod common;
 
@@ -27,7 +52,7 @@ fn test_generate_state_with_real_files() {
     fs::write(&file3, "This is file 3 in subdirectory").unwrap();
 
     // Generate state
-    let state = generate_state(&root).unwrap();
+    let state = generate_state(&root, false).unwrap();
 
     // Verify state was created with a valid timestamp
     assert!(state.last_sync_timestamp_micros > 0);
@@ -35,7 +60,7 @@ fn test_generate_state_with_real_files() {
     // Create another state from empty directory to compare
     let empty_dir = tempdir().unwrap();
     let empty_root = PathBuf::from(empty_dir.path());
-    let empty_state = generate_state(&empty_root).unwrap();
+    let empty_state = generate_state(&empty_root, false).unwrap();
 
     // Comparing empty state with our state should show 3 additions
     let diffs = compare_states(&empty_state, &state);
@@ -54,13 +79,13 @@ fn test_generate_state_empty_directory() {
     let dir = tempdir().unwrap();
     let root = PathBuf::from(dir.path());
 
-    let state = generate_state(&root).unwrap();
+    let state = generate_state(&root, false).unwrap();
 
     // Verify timestamp is set
     assert!(state.last_sync_timestamp_micros > 0);
 
     // Verify empty by comparing states
-    let state2 = generate_state(&root).unwrap();
+    let state2 = generate_state(&root, false).unwrap();
     let diffs = compare_states(&state, &state2);
     assert_eq!(diffs.len(), 0);
 }
@@ -71,14 +96,14 @@ fn test_compare_states_with_real_file_addition() {
     let root = PathBuf::from(dir.path());
 
     // Generate initial state
-    let state1 = generate_state(&root).unwrap();
+    let state1 = generate_state(&root, false).unwrap();
 
     // Add a new file
     let new_file = root.join("new_file.txt");
     fs::write(&new_file, "New content").unwrap();
 
     // Generate new state
-    let state2 = generate_state(&root).unwrap();
+    let state2 = generate_state(&root, false).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -106,7 +131,7 @@ fn test_compare_states_with_real_file_modification() {
     fs::write(&file, "Original content").unwrap();
 
     // Generate initial state
-    let state1 = generate_state(&root).unwrap();
+    let state1 = generate_state(&root, false).unwrap();
 
     // Wait a bit to ensure timestamp changes
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -115,7 +140,7 @@ fn test_compare_states_with_real_file_modification() {
     fs::write(&file, "Modified content - different hash").unwrap();
 
     // Generate new state
-    let state2 = generate_state(&root).unwrap();
+    let state2 = generate_state(&root, false).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -143,13 +168,13 @@ fn test_compare_states_with_real_file_removal() {
     fs::write(&file, "This will be removed").unwrap();
 
     // Generate initial state
-    let state1 = generate_state(&root).unwrap();
+    let state1 = generate_state(&root, false).unwrap();
 
     // Remove the file
     fs::remove_file(&file).unwrap();
 
     // Generate new state
-    let state2 = generate_state(&root).unwrap();
+    let state2 = generate_state(&root, false).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -181,7 +206,7 @@ fn test_compare_states_with_multiple_changes() {
     fs::write(&file3, "Will be removed").unwrap();
 
     // Generate initial state
-    let state1 = generate_state(&root).unwrap();
+    let state1 = generate_state(&root, false).unwrap();
 
     // Wait to ensure timestamp changes
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -193,7 +218,7 @@ fn test_compare_states_with_multiple_changes() {
     fs::write(&file4, "New file added").unwrap(); // Added
 
     // Generate new state
-    let state2 = generate_state(&root).unwrap();
+    let state2 = generate_state(&root, false).unwrap();
 
     // Compare states
     let diffs = compare_states(&state1, &state2);
@@ -220,190 +245,500 @@ fn test_compare_states_with_multiple_changes() {
 }
 
 #[tokio::test]
-async fn test_get_file_creates_new_file() {
+async fn test_full_sync_new_file() {
+    // Setup: Simulate server receiving a new file from client via Upload
     let dir = tempdir().unwrap();
     let root_path = PathBuf::from(dir.path());
-    let file_path = root_path.join("test_file.txt");
+    let file_path = root_path.join("new_file.txt");
+    let config = common::create_test_config(&root_path);
 
-    let file_sync = harmonic::proto::FileSync {
-        path: "test_file.txt".to_string(),
-        chunk: vec![],
-        offset: 0,
-        is_final: false,
-        file_size: 1024,
-    };
+    // Content that client will send
+    let content = "Hello, World!".as_bytes().to_vec();
 
-    let file = get_file(&file_sync, &root_path).await.unwrap();
+    // Server side: Prepare to receive
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut sink = PollSender::new(tx).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+    let mut server_file_path = PathBuf::new();
+    let mut writer_tx = None;
 
-    // Verify file was created
+    // Step 1: Server receives FileAction with Upload direction
+    // This means: client wants to upload a file to server
+    // Server responds with Signatures (empty if file doesn't exist on server)
+    let payload = sync_request::Payload::FileAction(FileAction {
+        path: "new_file.txt".to_string(),
+        direction: TransferDirection::Upload as i32,
+        timestamp_latest_modified: Default::default(),
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Verify server set path and sent signatures
+    assert_eq!(server_file_path, PathBuf::from("new_file.txt"));
+    let response = rx.recv().await.unwrap();
+    match response.payload.unwrap() {
+        sync_request::Payload::Signatures(sigs) => {
+            assert!(sigs.blocks.is_empty()); // File doesn't exist on server yet
+        }
+        _ => panic!("Expected Signatures"),
+    }
+
+    // Step 2: Client calculates Delta from signatures and sends it
+    // Since file is new (empty signatures), client sends entire content as literal
+    let payload = sync_request::Payload::Delta(Delta {
+        index: 0,
+        instruction: Some(harmonic::proto::delta::Instruction::Literal(content.clone())),
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Close the writer channel to flush writes
+    drop(writer_tx);
+
+    // Wait for async write to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
     assert!(file_path.exists());
-
-    // Verify file size was set
-    let metadata = file.metadata().await.unwrap();
-    assert_eq!(metadata.len(), 1024);
+    let written_content = fs::read(&file_path).unwrap();
+    assert_eq!(written_content, content);
 }
 
 #[tokio::test]
-async fn test_write_data_to_offset() {
+async fn test_delta_sync_modified_file() {
+    // Setup: Simulate server receiving a modified file from client via Upload
+    // Server already has an old version of the file
     let dir = tempdir().unwrap();
     let root_path = PathBuf::from(dir.path());
-    let file_path = root_path.join("offset_test.txt");
-    let path = "offset_test.txt".to_string();
+    let file_path = root_path.join("modified.txt");
+    let config = common::create_test_config(&root_path);
 
-    // Create file with specific size
-    let file_sync = harmonic::proto::FileSync {
-        path: path.clone(),
-        chunk: vec![],
-        offset: 0,
-        is_final: false,
-        file_size: 100,
+    // Create initial file on server
+    let initial_content = "Hello World".as_bytes();
+    fs::write(&file_path, initial_content).unwrap();
+
+    // Server side setup
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut sink = PollSender::new(tx).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+    let mut server_file_path = PathBuf::new();
+    let mut writer_tx = None;
+
+    // Step 1: Server receives FileAction with Upload direction
+    // Client wants to upload modified file to server
+    // Server sends back signatures of its current file version
+    let payload = sync_request::Payload::FileAction(FileAction {
+        path: "modified.txt".to_string(),
+        direction: TransferDirection::Upload as i32,
+        timestamp_latest_modified: Default::default(),
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Verify server sent signatures for existing file
+    let response = rx.recv().await.unwrap();
+    let signatures = match response.payload.unwrap() {
+        sync_request::Payload::Signatures(sigs) => sigs,
+        _ => panic!("Expected Signatures"),
     };
+    assert!(!signatures.blocks.is_empty()); // File exists on server
+    assert!(writer_tx.is_some()); // delta_writer created with block cache
 
-    let mut file = get_file(&file_sync, &root_path).await.unwrap();
+    // Step 2: Client receives signatures and calculates delta
+    // For this test, we simulate client sending new content as literal
+    // In reality, client would use send_delta_from_block_signatures to calculate
+    // optimal delta (reusing matching blocks, sending literals for differences)
+    // Since block size (8192) > file size (11 bytes), entire file is 1 block
+    let new_content = "Hello Rust World".as_bytes().to_vec();
+    let payload = sync_request::Payload::Delta(Delta {
+        index: 0,
+        instruction: Some(harmonic::proto::delta::Instruction::Literal(new_content.clone())),
+    });
 
-    // Write data at offset 0
-    let data1 = harmonic::proto::FileSync {
-        path: path.clone(),
-        chunk: vec![1, 2, 3, 4, 5],
-        offset: 0,
-        is_final: false,
-        file_size: 100,
-    };
-    write_data_to_offset(data1, &mut file).await.unwrap();
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
 
-    // Write data at offset 10
-    let data2 = harmonic::proto::FileSync {
-        path: path.clone(),
-        chunk: vec![6, 7, 8, 9, 10],
-        offset: 10,
-        is_final: false,
-        file_size: 100,
-    };
-    write_data_to_offset(data2, &mut file).await.unwrap();
+    // Close the writer channel to flush writes
+    drop(writer_tx);
 
-    // Flush and sync to ensure data is written
-    file.sync_all().await.unwrap();
+    // Wait for async write to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // Close the write file and reopen for reading
-    drop(file);
-
-    // Open file for reading and verify data was written at correct offsets
-    let mut read_file = tokio::fs::File::open(&file_path).await.unwrap();
-
-    read_file.seek(std::io::SeekFrom::Start(0)).await.unwrap();
-    let mut buffer = vec![0u8; 5];
-    read_file.read_exact(&mut buffer).await.unwrap();
-    assert_eq!(buffer, vec![1, 2, 3, 4, 5]);
-
-    read_file.seek(std::io::SeekFrom::Start(10)).await.unwrap();
-    let mut buffer2 = vec![0u8; 5];
-    read_file.read_exact(&mut buffer2).await.unwrap();
-    assert_eq!(buffer2, vec![6, 7, 8, 9, 10]);
+    let written_content = fs::read(&file_path).unwrap();
+    assert_eq!(written_content, new_content);
 }
 
 #[tokio::test]
-async fn test_file_to_chunked_file_sync() {
+async fn test_download_new_file() {
+    // Setup: Simulate client downloading a new file from server
+    // Server has the file, client doesn't
     let dir = tempdir().unwrap();
     let root_path = PathBuf::from(dir.path());
-    let file_path = root_path.join("chunk_test.txt");
+    let server_file_path = root_path.join("download_new.txt");
+    let config = common::create_test_config(&root_path);
 
-    // Create a file larger than chunk size (8192 bytes)
-    let content = "x".repeat(20000); // 20KB file
-    fs::write(&file_path, &content).unwrap();
+    // Create file on server
+    let server_content = "Content from server".as_bytes();
+    fs::write(&server_file_path, server_content).unwrap();
 
-    let relative_path = PathBuf::from("chunk_test.txt");
-    let stream = file_to_chunked_file_sync(&relative_path, &root_path);
-    pin_mut!(stream);
+    // Server side setup
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut sink = PollSender::new(tx).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+    let mut file_path = PathBuf::new();
+    let mut writer_tx = None;
 
-    let mut total_bytes = 0;
-    let mut chunk_count = 0;
+    // Step 1: Server receives FileAction with Download direction
+    // This means: client wants to download a file from server
+    // Server just sets the file path (doesn't send signatures)
+    let payload = sync_request::Payload::FileAction(FileAction {
+        path: "download_new.txt".to_string(),
+        direction: TransferDirection::Download as i32,
+        timestamp_latest_modified: Default::default(),
+    });
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.unwrap();
-        chunk_count += 1;
-        total_bytes += chunk.chunk.len() as u64;
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
 
-        // Verify chunk properties
-        assert_eq!(chunk.path, "chunk_test.txt");
-        assert_eq!(chunk.file_size, 20000);
-        assert!(chunk.chunk.len() <= 8192);
+    // Verify server set path but didn't send anything (no signatures for Download)
+    assert_eq!(file_path, PathBuf::from("download_new.txt"));
+    assert!(writer_tx.is_none()); // No writer created for Download
+
+    // Step 2: Client sends Signatures (empty since file doesn't exist on client)
+    // The handler will convert the relative file_path to absolute internally
+    let payload = sync_request::Payload::Signatures(harmonic::proto::BlockSignatures {
+        block_size: config.block_size,
+        blocks: vec![],
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Step 3: Server should have sent deltas
+    // Collect all delta messages
+    let mut deltas = vec![];
+    while let Ok(response) = rx.try_recv() {
+        if let Some(sync_request::Payload::Delta(delta)) = response.payload {
+            deltas.push(delta);
+        } else if let Some(sync_request::Payload::Complete(_)) = response.payload {
+            break;
+        }
     }
 
-    // Verify all data was read
-    assert_eq!(total_bytes, 20000);
-    // Should be 3 chunks: 8192 + 8192 + 3616
-    assert_eq!(chunk_count, 3);
+    // Verify we got at least one delta with the full content
+    assert!(!deltas.is_empty());
+
+    // Since file is new, should be a literal with full content
+    let first_delta = &deltas[0];
+    if let Some(harmonic::proto::delta::Instruction::Literal(content)) = &first_delta.instruction {
+        assert_eq!(content, server_content);
+    } else {
+        panic!("Expected Literal instruction for new file");
+    }
 }
 
 #[tokio::test]
-async fn test_file_to_chunked_file_sync_small_file() {
+async fn test_download_modified_file() {
+    // Setup: Simulate client downloading a modified file from server
+    // Both have the file but server's version is newer
     let dir = tempdir().unwrap();
     let root_path = PathBuf::from(dir.path());
-    let file_path = root_path.join("small_file.txt");
+    let server_file_path = root_path.join("download_modified.txt");
+    let config = common::create_test_config(&root_path);
 
-    // Create a small file (less than chunk size)
-    let content = "Small file content";
-    fs::write(&file_path, &content).unwrap();
+    // Create file on server with new content
+    let server_content = "Updated content from server".as_bytes();
+    fs::write(&server_file_path, server_content).unwrap();
 
-    let relative_path = PathBuf::from("small_file.txt");
-    let stream = file_to_chunked_file_sync(&relative_path, &root_path);
-    pin_mut!(stream);
+    // Server side setup
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut sink = PollSender::new(tx).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+    let mut file_path = PathBuf::new();
+    let mut writer_tx = None;
 
-    let mut chunks = vec![];
-    while let Some(chunk) = stream.next().await {
-        chunks.push(chunk.unwrap());
+    // Step 1: Server receives FileAction with Download direction
+    let payload = sync_request::Payload::FileAction(FileAction {
+        path: "download_modified.txt".to_string(),
+        direction: TransferDirection::Download as i32,
+        timestamp_latest_modified: Default::default(),
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    assert_eq!(file_path, PathBuf::from("download_modified.txt"));
+
+    // Step 2: Client sends Signatures of its old version
+    // For this test, we'll send empty signatures to simulate client doesn't have it
+    // The handler will convert the relative file_path to absolute internally
+    let payload = sync_request::Payload::Signatures(harmonic::proto::BlockSignatures {
+        block_size: config.block_size,
+        blocks: vec![],
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Step 3: Verify server sent deltas
+    let mut received_complete = false;
+    while let Ok(response) = rx.try_recv() {
+        if let Some(sync_request::Payload::Complete(_)) = response.payload {
+            received_complete = true;
+            break;
+        }
     }
 
-    // Should be exactly 1 chunk
-    assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].chunk, content.as_bytes());
-    assert_eq!(chunks[0].file_size, content.len() as u64);
+    assert!(received_complete, "Server should send Complete message");
 }
 
 #[tokio::test]
-async fn test_roundtrip_file_chunking_and_writing() {
+async fn test_delta_sync_with_block_reuse() {
+    // Setup: Test that delta sync actually reuses matching blocks
+    // This requires a larger file with partial modifications
     let dir = tempdir().unwrap();
     let root_path = PathBuf::from(dir.path());
-    let source_file = root_path.join("source.txt");
-    let dest_file = root_path.join("destination.txt");
+    let file_path = root_path.join("block_reuse.txt");
 
-    // Create source file with known content
-    let original_content =
-        "This is a test file with some content that will be chunked and reassembled.".repeat(200);
-    fs::write(&source_file, &original_content).unwrap();
+    // Use a smaller block size for this test to ensure multiple blocks
+    let mut config = common::create_test_config(&root_path);
+    config.block_size = 16; // Small block size for testing
 
-    // Get file size
-    let file_size = fs::metadata(&source_file).unwrap().len();
+    // Create initial file on server with content that spans multiple blocks
+    // Block 0: "Block 0 content!"  (16 bytes)
+    // Block 1: "Block 1 content!"  (16 bytes)
+    // Block 2: "Block 2 content!"  (16 bytes)
+    let initial_content = "Block 0 content!Block 1 content!Block 2 content!";
+    fs::write(&file_path, initial_content).unwrap();
 
-    // Create destination file
-    let file_sync_init = harmonic::proto::FileSync {
-        path: "destination.txt".to_string(),
-        chunk: vec![],
-        offset: 0,
-        is_final: false,
-        file_size,
+    // Server side setup
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut sink = PollSender::new(tx).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+    let mut server_file_path = PathBuf::new();
+    let mut writer_tx = None;
+
+    // Step 1: Server receives FileAction with Upload direction
+    let payload = sync_request::Payload::FileAction(FileAction {
+        path: "block_reuse.txt".to_string(),
+        direction: TransferDirection::Upload as i32,
+        timestamp_latest_modified: Default::default(),
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Verify server sent signatures
+    let response = rx.recv().await.unwrap();
+    let signatures = match response.payload.unwrap() {
+        sync_request::Payload::Signatures(sigs) => sigs,
+        _ => panic!("Expected Signatures"),
     };
-    let mut dest = get_file(&file_sync_init, &root_path).await.unwrap();
 
-    // Read source in chunks and write to destination
-    let relative_source = PathBuf::from("source.txt");
-    let stream = file_to_chunked_file_sync(&relative_source, &root_path);
-    pin_mut!(stream);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.unwrap();
-        write_data_to_offset(chunk, &mut dest).await.unwrap();
+    // Should have 3 blocks (48 bytes / 16 bytes per block)
+    assert_eq!(signatures.blocks.len(), 3);
+    assert!(writer_tx.is_some());
+
+    // Step 2: Simulate client sending delta with block reuse
+    // Client will reuse block 0 and 2, but send new literal for block 1
+    // Delta 0: Reuse block 0
+    let delta_0 = sync_request::Payload::Delta(Delta {
+        index: 0,
+        instruction: Some(harmonic::proto::delta::Instruction::BlockIndex(0)),
+    });
+
+    handle_sync_payload(
+        delta_0,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Delta 1: New content for middle block
+    let new_middle_content = "MODIFIED CONTENT".as_bytes().to_vec();
+    let delta_1 = sync_request::Payload::Delta(Delta {
+        index: 16,
+        instruction: Some(harmonic::proto::delta::Instruction::Literal(new_middle_content.clone())),
+    });
+
+    handle_sync_payload(
+        delta_1,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Delta 2: Reuse block 2
+    let delta_2 = sync_request::Payload::Delta(Delta {
+        index: 32,
+        instruction: Some(harmonic::proto::delta::Instruction::BlockIndex(2)),
+    });
+
+    handle_sync_payload(
+        delta_2,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Close writer and wait for flush
+    drop(writer_tx);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Verify reconstructed file
+    let written_content = fs::read_to_string(&file_path).unwrap();
+    let expected = "Block 0 content!MODIFIED CONTENTBlock 2 content!";
+    assert_eq!(written_content, expected);
+}
+
+#[tokio::test]
+async fn test_complete_message_handling() {
+    // Setup: Test that Complete message returns proper status
+    let dir = tempdir().unwrap();
+    let root_path = PathBuf::from(dir.path());
+    let config = common::create_test_config(&root_path);
+
+    let (tx, _rx) = mpsc::channel(10);
+    let mut sink = PollSender::new(tx).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+    let mut file_path = PathBuf::new();
+    let mut writer_tx = None;
+
+    // Send Complete message
+    let payload = sync_request::Payload::Complete(true);
+
+    let status = handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Verify it returns Completed status
+    assert!(matches!(status, harmonic::sync::handler::SyncStatus::Completed));
+}
+
+#[tokio::test]
+async fn test_large_file_multiple_blocks() {
+    // Setup: Test syncing a file larger than block size with actual content
+    let dir = tempdir().unwrap();
+    let root_path = PathBuf::from(dir.path());
+    let file_path = root_path.join("large_file.bin");
+
+    let mut config = common::create_test_config(&root_path);
+    config.block_size = 1024; // 1KB blocks
+
+    // Create a 3KB file (3 blocks)
+    let block1 = vec![1u8; 1024];
+    let block2 = vec![2u8; 1024];
+    let block3 = vec![3u8; 1024];
+    let mut content = Vec::new();
+    content.extend_from_slice(&block1);
+    content.extend_from_slice(&block2);
+    content.extend_from_slice(&block3);
+
+    // Initially don't write to disk (simulating new file)
+
+    // Server side setup
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut sink = PollSender::new(tx).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+    let mut server_file_path = PathBuf::new();
+    let mut writer_tx = None;
+
+    // Step 1: Server receives FileAction
+    let payload = sync_request::Payload::FileAction(FileAction {
+        path: "large_file.bin".to_string(),
+        direction: TransferDirection::Upload as i32,
+        timestamp_latest_modified: Default::default(),
+    });
+
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
+
+    // Get signatures (should be empty)
+    let response = rx.recv().await.unwrap();
+    match response.payload.unwrap() {
+        sync_request::Payload::Signatures(sigs) => {
+            assert!(sigs.blocks.is_empty());
+        }
+        _ => panic!("Expected Signatures"),
     }
 
-    // Close the file
-    drop(dest);
+    // Step 2: Send the entire file as one large literal
+    let payload = sync_request::Payload::Delta(Delta {
+        index: 0,
+        instruction: Some(harmonic::proto::delta::Instruction::Literal(content.clone())),
+    });
 
-    // Verify files are identical
-    let source_content = fs::read(&source_file).unwrap();
-    let dest_content = fs::read(&dest_file).unwrap();
-    assert_eq!(source_content, dest_content);
+    handle_sync_payload(
+        payload,
+        &mut sink,
+        &mut server_file_path,
+        config.clone(),
+        &mut writer_tx,
+    ).await.unwrap();
 
-    // Verify hashes match -> updated to blake3
-    let source_hash: [u8; 32] = *blake3::hash(&source_content).as_bytes();
-    let dest_hash: [u8; 32] = *blake3::hash(&dest_content).as_bytes();
-    assert_eq!(source_hash, dest_hash);
+    // Close writer and wait
+    drop(writer_tx);
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // Verify file was written correctly
+    assert!(file_path.exists());
+    let written_content = fs::read(&file_path).unwrap();
+    assert_eq!(written_content.len(), 3072);
+    assert_eq!(&written_content[0..1024], &block1[..]);
+    assert_eq!(&written_content[1024..2048], &block2[..]);
+    assert_eq!(&written_content[2048..3072], &block3[..]);
 }
+
+
