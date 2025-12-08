@@ -20,7 +20,6 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 
 **Usability**
 - [ ] Improve tracing - currently a bit hard to follow. Improve how traces and spans are captured and what is instrumented
-- [ ] Improve cli functionality -> allow more config to be directly passed as args
 - [ ] Better initial setup cli guidance -> prompt user to enter certain config rather than referring to config file?
 
 **Configurability**
@@ -38,6 +37,7 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [x] Implement compression (zstd?) -> zstd! should make this a feature / configurable
 - [x] Use tracing crate for distributed trace
 - [x] Fix `futures::lock::Mutex` to `tokio::sync::Mutex`
+- [x] Improve cli functionality -> allow more config to be directly passed as args
 - [x] Improve error handling and propagation -> thiserror + anyhow
 
 
