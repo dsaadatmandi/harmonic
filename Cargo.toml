@@ -25,7 +25,7 @@ name = "harmonic"
 path = "src/lib.rs"
 
 [dependencies]
-tonic = {version = "0.14.2", features = ["zstd"]}
+tonic = { version = "0.14.2", features = ["_tls-any", "zstd"] }
 prost = "0.14.1"
 tonic-prost = "0.14.2"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "sync", "fs"]} 
@@ -62,6 +62,7 @@ path-clean = "1.0.1"
 pathdiff = "0.2.3"
 filetime = "0.2.26"
 prost-types = "0.14.1"
+rcgen = "0.14.5"
 
 [dev-dependencies]
 tempfile = "3.23.0"

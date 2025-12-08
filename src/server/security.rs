@@ -1,0 +1,29 @@
+use std::{fs};
+
+use dirs::config_dir;
+use rcgen::{CertifiedKey, generate_simple_self_signed};
+use tonic::transport::Identity;
+
+use crate::{Config, utils::{HarmonicError, Result}};
+
+pub fn get_cert(config: &Config) -> Result<Identity> {
+    let config_dir = config_dir().unwrap_or(config.sync_path.join(".harmonic"));
+    let cert_path = config_dir.join("certificate.crt");
+    let private_key_path = config_dir.join("certificate.pk");
+
+    if cert_path.exists() && private_key_path.exists() {
+        let cert = fs::read(cert_path)?;
+        let key = fs::read(private_key_path)?;
+
+        Ok(Identity::from_pem(cert, key))
+    } else {
+        let simple_cert_pre = vec![config.socket_addr.clone()];
+        
+        let CertifiedKey { cert, signing_key } = generate_simple_self_signed(simple_cert_pre).map_err(|e| HarmonicError::CryptoError(e.to_string()))?;
+        fs::write(cert_path, cert.pem())?;
+        fs::write(private_key_path, signing_key.serialize_pem())?;
+        Ok(Identity::from_pem(cert.pem(), signing_key.public_key_pem()))
+
+
+    }
+}
