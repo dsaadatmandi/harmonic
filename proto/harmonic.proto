@@ -1,10 +1,12 @@
 syntax = "proto3";
 
+import "google/protobuf/timestamp.proto";
+
 package harmonic;
 
 service Harmonic {
   rpc HarmonizeClientInitiateSync (ClientSyncState) returns (ServerSyncStateResponse);
-  rpc HarmonizeSynchronizeState (stream FileSync) returns (stream FileSync);
+  rpc HarmonizeSyncRequest (stream SyncRequest) returns (stream SyncRequest);
 }
 
 enum FileType {
@@ -15,8 +17,8 @@ enum FileType {
 
 enum TransferDirection {
   SKIP = 0;
-  SERVER_SEND = 1;
-  CLIENT_SEND = 2;
+  DOWNLOAD = 1;
+  UPLOAD = 2;
 }
 
 message ClientSyncState {
@@ -27,7 +29,7 @@ message ClientSyncState {
 
 message FileStatus {
   string path = 1;
-  int64 timestamp_micro = 2;
+  google.protobuf.Timestamp timestamp = 2;
   FileType file_type = 3;
   bytes hash = 4;
 }
@@ -41,12 +43,32 @@ message ServerSyncStateResponse {
 message FileAction {
   string path = 1;
   TransferDirection direction = 2;
+  google.protobuf.Timestamp timestamp_latest_modified = 3; 
 }
 
-message FileSync {
-  string path = 1;
-  bytes chunk = 2;
-  uint64 offset = 3;
-  bool is_final = 4;
-  uint64 file_size = 5;
+message SyncRequest {
+  oneof payload {
+    FileAction file_action = 1;
+    BlockSignatures signatures = 2;
+    Delta delta = 3;
+    bool complete = 4;
+  }
+}
+
+message BlockSignatures {
+  uint64 block_size = 1;
+  repeated BlockSignature blocks = 2;
+}
+
+message BlockSignature {
+  uint64 weak_checksum = 1;
+  bytes strong_checksum = 2;
+}
+
+message Delta {
+  uint64 index = 1;
+  oneof instruction {
+    uint32 block_index = 2;
+    bytes literal = 3;
+  }
 }

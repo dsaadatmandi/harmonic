@@ -40,6 +40,9 @@ pub enum HarmonicError {
 
     #[error("Invalid input parameters")]
     InvalidInputError,
+
+    #[error("gRPC send error: {0}")]
+    SendError(String),
 }
 
 pub type Result<T> = std::result::Result<T, HarmonicError>;
