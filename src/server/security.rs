@@ -2,11 +2,11 @@ use std::{fs};
 
 use dirs::config_dir;
 use rcgen::{CertifiedKey, generate_simple_self_signed};
-use tonic::transport::Identity;
+use tonic::transport::{Identity, ServerTlsConfig};
 
 use crate::{Config, utils::{HarmonicError, Result}};
 
-pub fn get_cert(config: &Config) -> Result<Identity> {
+pub fn get_identity(config: &Config) -> Result<Identity> {
     let config_dir = config_dir().unwrap_or(config.sync_path.join(".harmonic"));
     let cert_path = config_dir.join("certificate.crt");
     let private_key_path = config_dir.join("certificate.pk");
@@ -22,8 +22,12 @@ pub fn get_cert(config: &Config) -> Result<Identity> {
         let CertifiedKey { cert, signing_key } = generate_simple_self_signed(simple_cert_pre).map_err(|e| HarmonicError::CryptoError(e.to_string()))?;
         fs::write(cert_path, cert.pem())?;
         fs::write(private_key_path, signing_key.serialize_pem())?;
+
         Ok(Identity::from_pem(cert.pem(), signing_key.public_key_pem()))
-
-
     }
+}
+
+pub fn get_server_tls_config(config: &Config) -> Result<ServerTlsConfig> {
+    let identity = get_identity(&config)?;
+    Ok(ServerTlsConfig::new().identity(identity))
 }
