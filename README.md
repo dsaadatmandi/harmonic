@@ -10,25 +10,26 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [ ] Add retry logic with debounce
 
 **Security Improvements**
-- [ ] Implement TLS encryption for network traffic -> letsencrypt? requires internet and infra setup / ssh style "fingerprint" prompt
+
 - [ ] Investigate complexity of authentication/authorization (token-based or mTLS)
 - [ ] Implement graceful shutdown handling
 
 **Performance Enhancements**
-- [ ] Add parallel file writes -> algorithm is now parallelised. Separate point on this further down
 - [ ] Add zero-copy I/O optimizations -> this should be implemented, particularly for larger files. use Bytes type?
 
 **Usability**
 - [ ] Improve tracing - currently a bit hard to follow. Improve how traces and spans are captured and what is instrumented
-- [ ] Better initial setup cli guidance -> prompt user to enter certain config rather than referring to config file?
+- [ ] Improve cli functionality -> allow more config to be directly passed as args
 
 **Configurability**
 - [ ] More sync modes that can trigger start -> May be redundant
 
 **Completed**
 - [x] Investigate replacing MD5 (BLAKE3!) -> now using faster, more secure BLAKE3 -> enabler for rolling hash partial updates?
+- [x] Implement TLS encryption for network traffic -> ~~letsencrypt? requires internet and infra setup / ssh style "fingerprint" prompt~~ added bootstrap functionality to share self signed cert with clients via new grpc service
 - [x] Overhaul synchronization algorithm -> rsync style rolling hash but faster algorithms and protocol + set and forget style sync with debounce
-- [x] Implement weak hashing algorithm -> No actively maintained adler32 crate with rolling hash -> Implemented BuzHash in pure rust. Potentially faster than adler32, to be investigated
+- [x] Add parallel file writes -> algorithm is now parallelised. Separate point on this further down
+- [x] Implement weak hashing algorithm -> No actively maintained adler32 crate with rolling hash -> Implemented BuzHash in pure rust -> Potentially faster than adler32
 - [x] Configurable debounce algorithm
 - [x] Prevent directory traversal attacks -> should be resolved due to relative path creation
 - [x] Implement delta sync ~~(converging dynamic rolling hash idea)~~ -> Proper rolling hash algorithm implemented
@@ -37,8 +38,9 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [x] Implement compression (zstd?) -> zstd! should make this a feature / configurable
 - [x] Use tracing crate for distributed trace
 - [x] Fix `futures::lock::Mutex` to `tokio::sync::Mutex`
-- [x] Improve cli functionality -> allow more config to be directly passed as args
 - [x] Improve error handling and propagation -> thiserror + anyhow
+- [x] Better initial setup cli guidance -> prompt user to enter certain config rather than referring to config file?
+
 
 
 ### On the topic of parallel file writes
