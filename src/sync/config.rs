@@ -1,9 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::path::PathBuf;
-use std::process::exit;
 use std::str::FromStr;
-use std::{fs, io, path};
+use std::{fs, io};
 use tracing::{debug, error, info};
 use tracing_core::Level;
 
@@ -48,7 +47,7 @@ impl Config {
     }
 }
 
-fn config_dir_path() -> Result<PathBuf> {
+pub fn config_dir_path() -> Result<PathBuf> {
     // let mut path = dirs::config_dir().ok_or(HarmonicError::ConfigError)?;
     let mut path = PathBuf::from(".");
     path.push(".harmonic");

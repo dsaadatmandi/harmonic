@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package bootstrap;
+
+// Bootstrap service for initial client setup and certificate distribution.
+service Bootstrap {
+    // Exchanges a one-time password for the server's TLS certificate.
+    rpc GetCertificate (CertificateRequest) returns (CertificateResponse);
+}
+
+message CertificateRequest {
+    string otp = 1;
+}
+
+message CertificateResponse {
+    bytes certificate_pem = 1;
+}

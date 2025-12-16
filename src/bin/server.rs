@@ -11,6 +11,7 @@ use futures::{SinkExt, StreamExt};
 use harmonic::Config;
 use harmonic::proto::Delta;
 use harmonic::proto::SyncRequest;
+use harmonic::server::get_server_tls_config;
 use harmonic::sync::handler::SyncStatus;
 use harmonic::sync::handler::handle_sync_payload;
 use harmonic::utils::HarmonicError;
@@ -35,7 +36,7 @@ use harmonic::proto::{
     ClientSyncState, FileAction, FileStatus, ServerSyncStateResponse,
     harmonic_server::{Harmonic, HarmonicServer},
 };
-use harmonic::sync::{self, SyncState};
+use harmonic::sync::{self, SyncState, config::config_dir_path};
 
 #[derive(Clone, Debug)]
 struct SessionData {
@@ -117,7 +118,7 @@ impl Harmonic for HarmonicService {
         tracing::Span::current().record("session_uuid", tracing::field::display(&session_uuid));
 
         // check session
-        let session = self.sync_sessions
+        let _session = self.sync_sessions
             .lock()
             .await
             .get(&session_uuid)
@@ -217,6 +218,13 @@ async fn main() -> Result<()> {
         .socket_addr
         .parse()
         .context("Somehow could not parse address..?")?;
+
+    let tls_config = get_server_tls_config(&config)?;
+
+    let cert_path = config_dir_path()
+        .unwrap_or(config.sync_path.join(".harmonic"))
+        .join("certificate.crt");
+
     let harmonic = HarmonicService {
         sync_sessions: Arc::new(Mutex::new(HashMap::new())),
         config,
@@ -229,7 +237,8 @@ async fn main() -> Result<()> {
         .send_compressed(CompressionEncoding::Zstd)
         .accept_compressed(CompressionEncoding::Zstd);
 
-    let app = Server::builder()
+    let main_server = Server::builder()
+        .tls_config(tls_config)?
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_grpc().make_span_with(make_span))
@@ -238,8 +247,22 @@ async fn main() -> Result<()> {
         .add_service(service)
         .serve(address);
 
-    info!("Server started");
-    app.await?;
+    info!("Main server started on {}", address);
+
+    info!("Starting bootstrap server on port 42070");
+    let bootstrap_server = harmonic::server::run_bootstrap_server(cert_path);
+
+    // using select so if either fails, the other shuts down
+    tokio::select! {
+        result = main_server => {
+            result?;
+            info!("Main server stopped");
+        }
+        result = bootstrap_server => {
+            result?;
+            info!("Bootstrap server stopped");
+        }
+    }
 
     Ok(())
 }

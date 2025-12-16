@@ -17,15 +17,15 @@ use futures::SinkExt;
 use notify::EventKind;
 use once_cell::sync::Lazy;
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 use tokio_util::sync::PollSender;
-use tonic::transport::Channel;
+use tonic::transport::{Certificate, Channel};
 use tracing::{Instrument, Span, debug, error, info, instrument};
 use uuid::Uuid;
 
-use harmonic::client::async_watch;
+use harmonic::client::{async_watch, bootstrap_from_server, load_cert};
 use harmonic::proto::{
     ClientSyncState, ServerSyncStateResponse, TransferDirection, harmonic_client::HarmonicClient,
 };
@@ -40,6 +40,8 @@ static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> =
     Lazy::new(|| Arc::new(Mutex::new(VecDeque::new())));
 
 static CONFIG: Lazy<Config> = Lazy::new(|| sync::load_config().expect("Failed to load config"));
+
+static CERT: OnceCell<Certificate> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -103,12 +105,17 @@ async fn run_sync() -> Result<()> {
     debug!("Starting sync execution");
     let sync_uuid = Uuid::new_v4();
     tracing::Span::current().record("sync_uuid", tracing::field::display(&sync_uuid));
+
+    let tls_config =
+        tonic::transport::ClientTlsConfig::new().ca_certificate(get_cert().await.clone());
+
     let channel = Channel::builder(
         CONFIG
             .server_uri()
             .parse()
             .context("Unable to convert address to URI")?,
     )
+    .tls_config(tls_config)?
     .connect()
     .await
     .context("Unable to connect")?;
@@ -120,7 +127,8 @@ async fn run_sync() -> Result<()> {
         .accept_compressed(CompressionEncoding::Zstd);
 
     let last_state = sync::load_state().context("Unable to load previous state")?;
-    let now_state = sync::generate_state(&CONFIG.sync_path, true).context("Failed to generate state")?;
+    let now_state =
+        sync::generate_state(&CONFIG.sync_path, true).context("Failed to generate state")?;
     let diffs = sync::compare_states(&last_state, &now_state);
 
     // wont check with server which is not ideal
@@ -302,8 +310,14 @@ where
                         harmonic::proto::BlockSignatures::default(),
                         harmonic::sync::state::BlockCache { blocks: vec![] },
                     ));
-            writer_tx =
-                Some(delta_writer(&file_path, cache, action.timestamp_latest_modified.unwrap_or_default()).await);
+            writer_tx = Some(
+                delta_writer(
+                    &file_path,
+                    cache,
+                    action.timestamp_latest_modified.unwrap_or_default(),
+                )
+                .await,
+            );
         } else {
             debug!("File doesn't exist, creating delta writer with empty cache");
             writer_tx = Some(
@@ -402,6 +416,18 @@ fn calculate_change_score(event_kind: EventKind, config: &sync::Config) -> u64 {
 
 fn should_trigger_sync(score: u64, config: &sync::Config) -> bool {
     score > config.sync_threshold
+}
+
+async fn get_cert() -> &'static Certificate {
+    CERT.get_or_init(|| async {
+        match load_cert() {
+            Ok(c) => c,
+            Err(_) => bootstrap_from_server(&CONFIG.socket_addr)
+                .await
+                .expect("Failed to bootstrap certificate from server"),
+        }
+    })
+    .await
 }
 
 #[cfg(feature = "schedule-based")]

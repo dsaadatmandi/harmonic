@@ -4,8 +4,12 @@ import "google/protobuf/timestamp.proto";
 
 package harmonic;
 
+// Harmonic service for bidirectional file synchronization using delta encoding
 service Harmonic {
+  // Initiates a sync session by sending client state and receiving a sync plan
   rpc HarmonizeClientInitiateSync (ClientSyncState) returns (ServerSyncStateResponse);
+
+  // Performs bidirectional streaming to transfer file deltas between client and server
   rpc HarmonizeSyncRequest (stream SyncRequest) returns (stream SyncRequest);
 }
 
