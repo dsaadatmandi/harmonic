@@ -47,21 +47,29 @@ jobs:
       with:
         targets: ${{ matrix.target }}
     
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        shared-key: ${{ matrix.target }}
+
+    - name: Install mold linker
+      if: matrix.os == 'ubuntu-latest' && matrix.target != 'aarch64-unknown-linux-gnu'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mold
+        echo "RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> $GITHUB_ENV
+
     - name: Install cross
       if: matrix.target == 'aarch64-unknown-linux-gnu'
-      run: cargo install cross --git https://github.com/cross-rs/cross
+      run: cargo install cross --locked
     
     - name: Build
       if: matrix.target != 'aarch64-unknown-linux-gnu'
-      run: |
-        cargo build --release --bin harmonic-server --target ${{ matrix.target }}
-        cargo build --release --bin harmonic-client --target ${{ matrix.target }}
+      run: cargo build --release --target ${{ matrix.target }}
 
     - name: Build (cross)
       if: matrix.target == 'aarch64-unknown-linux-gnu'
-      run: |
-        cross build --release --bin harmonic-server --target ${{ matrix.target }}
-        cross build --release --bin harmonic-client --target ${{ matrix.target }}
+      run: cross build --release --target ${{ matrix.target }}
 
     - name: Rename binaries (Windows)
       if: matrix.target == 'x86_64-pc-windows-msvc'
