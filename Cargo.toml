@@ -25,7 +25,7 @@ name = "harmonic"
 path = "src/lib.rs"
 
 [dependencies]
-tonic = { version = "0.14.2", features = ["_tls-any", "zstd"] }
+tonic = { version = "0.14.2", features = ["tls-ring", "zstd"] }
 prost = "0.14.1"
 tonic-prost = "0.14.2"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "sync", "fs"]} 
@@ -72,3 +72,8 @@ tempfile = "3.23.0"
 
 [build-dependencies]
 tonic-prost-build = "0.14.2"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
