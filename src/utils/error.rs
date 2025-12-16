@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use thiserror::Error;
+use tonic::transport;
 use walkdir::DirEntry;
+use http::uri::InvalidUri;
 
 #[derive(Error, Debug)]
 pub enum HarmonicError {
@@ -43,6 +45,21 @@ pub enum HarmonicError {
 
     #[error("gRPC send error: {0}")]
     SendError(String),
+
+    #[error("Crypto error: {0}")]
+    CryptoError(String),
+
+    #[error("Invalid Uri Error: {0}")]
+    UriError(#[from] InvalidUri),
+
+    #[error("Transport Error: {0}")]
+    TranksportError(#[from] transport::Error),
+
+    #[error("gRPC Status error: {0}")]
+    GrpcStatus(#[from] tonic::Status),
+
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 pub type Result<T> = std::result::Result<T, HarmonicError>;

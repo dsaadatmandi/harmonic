@@ -1,11 +1,10 @@
 use chrono::prelude::Utc;
-use prost_types::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
-use std::{default, fs};
+use std::{fs};
 use tracing::{debug, info, instrument, warn};
 use walkdir::WalkDir;
 
@@ -359,6 +358,7 @@ pub async fn generate_blocks_signatures(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use prost_types::Timestamp;
     use tempfile::tempdir;
 
     #[test]

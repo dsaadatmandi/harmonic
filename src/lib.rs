@@ -5,6 +5,7 @@ pub mod utils;
 
 pub mod proto {
     tonic::include_proto!("harmonic");
+    tonic::include_proto!("bootstrap");
 }
 
 // Re-export commonly used items
