@@ -2,7 +2,9 @@
 
 A high-performance distributed file synchronization system built with Rust, gRPC, and Tokio. Built to keep your files up-to-date with a modern tech and algorithm stack.
 
-## Development Roadmap
+<details>
+  <summary>Development Roadmap</summary>
+
 
 **Foundation**
 - [ ] Add connectivity check on startup / periodically?
@@ -43,9 +45,6 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - 💤 Investigate complexity of authentication/authorization (token-based or mTLS)
 - 💤 More sync modes that can trigger start -> May be redundant
 
-
-
-
 ### On the topic of parallel file writes
 Very difficult to implement asynchronous, platform agnostic parallel file writes to the same file.  
 Overview:  
@@ -53,7 +52,10 @@ Instructions may come in from other machine since file reads are very fast.
 A queue of messages with instructions to write to data to various locations will build up.  
 Chunks from signature generation are actually cached, available in memory, hence no io limitation.  
 Although the file api provided by tokio is asynchronous, underlying io operations are not necessarily.  
-Difficult to implement cross-platform -> do macos and windows support this?   
+Difficult to implement cross-platform -> do macos and windows support this?
+
+</details> 
+
 
 ---
 
