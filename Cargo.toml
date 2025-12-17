@@ -66,9 +66,17 @@ rustls = "0.23.35"
 rand = "0.9.2"
 http = "1.4.0"
 dirs = "6.0.0"
+proptest = "1.9.0"
 
 [dev-dependencies]
 tempfile = "3.23.0"
+criterion = { version = "0.8.1", features = ["html_reports"] }
+rollsum = "0.3.0"
+adler = "1.0.2"
+
+[[bench]]
+name = "hash_benchmark"
+harness = false
 
 [build-dependencies]
 tonic-prost-build = "0.14.2"

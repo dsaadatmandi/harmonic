@@ -28,7 +28,6 @@ pub struct FileMetadata {
     pub modified_ts: prost_types::Timestamp,
 }
 
-// serde timestamp from claude, lets see if this works ok
 mod timestamp_proto {
     use prost_types::Timestamp;
     use serde::{Deserialize, Deserializer, Serializer};

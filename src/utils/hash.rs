@@ -1,4 +1,5 @@
 use std::collections::{VecDeque};
+use proptest::prelude::*;
 
 const BUZ_HASH_TABLE: [u64; 256] = [
     0x5a397884c8e3300d,
@@ -318,5 +319,26 @@ impl BuzHash {
 
         self.hash
 
+    }
+}
+
+proptest! {
+    #[test]
+    fn test_rolling_hash(
+        data in prop::collection::vec(any::<u8>(), 100..1000),
+        window_size in 1usize..50usize,
+    ) {
+        let window = &data[data.len()-window_size..];
+        let mut hasher = BuzHash::new(window_size);
+        let expected_hash = hasher.compute(window);
+
+        let mut rolling_hasher = BuzHash::new(window_size);
+        rolling_hasher.compute(&data[0..window_size]);
+
+        for &byte in data[window_size..].iter() {
+            rolling_hasher.roll(byte);
+        }
+
+        prop_assert_eq!(rolling_hasher.hash, expected_hash);
     }
 }
