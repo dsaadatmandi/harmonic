@@ -2,6 +2,7 @@
 
 A high-performance distributed file synchronization system built with Rust, gRPC, and Tokio. Built to keep your files up-to-date with a modern tech and algorithm stack.
 
+⬇️⬇️⬇️ Expandable ⬇️⬇️⬇️
 <details>
   <summary>Development Roadmap</summary>
 
