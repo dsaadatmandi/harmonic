@@ -238,6 +238,7 @@ where
     Ok(())
 }
 
+#[instrument(skip(client, sync_path), fields(sync_uuid = %sync_uuid, action))]
 async fn sync_file<T: Debug>(
     mut client: HarmonicClient<T>,
     action: FileAction,
