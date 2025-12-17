@@ -1,6 +1,6 @@
 # Harmonic
 
-A high-performance distributed file synchronization system built with Rust, gRPC, and Tokio. Built to replace rsync on a modern tech and algirithm stack.
+A high-performance distributed file synchronization system built with Rust, gRPC, and Tokio. Built to keep your files up-to-date with a modern tech and algorithm stack.
 
 ## Development Roadmap
 
@@ -8,20 +8,17 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [ ] Add connectivity check on startup / periodically?
 - [ ] Add retry logic with debounce
 
-**Security Improvements**
-
-- [ ] Investigate complexity of authentication/authorization (token-based or mTLS)
-- [ ] Implement graceful shutdown handling
+**Security Improvements** ✅
 
 **Performance Enhancements**
 - [ ] Add zero-copy I/O optimizations -> this should be implemented, particularly for larger files. use Bytes type?
 
 **Usability**
-- [ ] Improve tracing - currently a bit hard to follow. Improve how traces and spans are captured and what is instrumented
+
+- [ ] Implement graceful shutdown handling
 - [ ] Improve cli functionality -> allow more config to be directly passed as args
 
-**Configurability**
-- [ ] More sync modes that can trigger start -> May be redundant
+**Configurability** ✅
 
 **Completed**
 - [x] Investigate replacing MD5 (BLAKE3!) -> now using faster, more secure BLAKE3 -> enabler for rolling hash partial updates?
@@ -40,6 +37,12 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [x] Fix `futures::lock::Mutex` to `tokio::sync::Mutex`
 - [x] Improve error handling and propagation -> thiserror + anyhow
 - [x] Better initial setup cli guidance -> prompt user to enter certain config rather than referring to config file?
+- [x] Improve tracing - currently a bit hard to follow. Improve how traces and spans are captured and what is instrumented
+
+**Out of scope**
+- 💤 Investigate complexity of authentication/authorization (token-based or mTLS)
+- 💤 More sync modes that can trigger start -> May be redundant
+
 
 
 
@@ -57,7 +60,7 @@ Difficult to implement cross-platform -> do macos and windows support this?
 
 ## Summary
 
-Harmonic provides bidirectional file synchronization between a client and server using a three-phase protocol: state comparison, sync planning, and bidirectional streaming transfer. It uses hash-based change detection and timestamp comparison to efficiently determine which files need to be transferred and in which direction.
+Harmonic provides bidirectional file synchronization between a client and server using a three-phase rsync-style protocol: state comparison with sync planning, block signature exchange, and delta transfer via bidirectional streaming. It uses BLAKE3 hash-based change detection and timestamp comparison to efficiently determine which files need synchronization. For modified files, BuzHash rolling checksums enable efficient delta transfers, sending only the changed portions of files.
 
 ## Features
 
@@ -69,7 +72,11 @@ Harmonic provides bidirectional file synchronization between a client and server
   - `schedule-based`: Periodic sync at configured intervals
   - `manual-only`: Daemon-less one-off manual synchronisation
 - **Cross-Platform**: Exclusively uses cross-platform crates and code. Tested on latest versions of Windows, MacOS and Ubuntu
-- **Chunked Transfers**: Smart chunking algorithm dynamically adjusts chunk size for rolling hash signature generation based on input data
+- **Delta Sync with Rolling Hash**: Uses BuzHash (custom 64-bit rolling hash) for efficient delta transfers - only changed blocks are sent over the network
+- **Dual-Hash Strategy**: BLAKE3 for strong file/block checksums, BuzHash for fast weak checksums during delta sync
+- **Configurable Block Size**: Adjustable block size for rolling hash signature generation (default 8KB)
+- **Optional Compression**: Zstd compression support via feature flag (enabled by default)
+- **Secure TLS**: Self-signed certificate with OTP-based bootstrap for secure client-server communication
 
 ## Performance
 
