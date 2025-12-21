@@ -62,7 +62,7 @@ pathdiff = "0.2.3"
 filetime = "0.2.26"
 prost-types = "0.14.1"
 rcgen = "0.14.5"
-rustls = "0.23.35"
+rustls = { version = "0.23.35", features = ["ring"] }
 rand = "0.9.2"
 http = "1.4.0"
 dirs = "6.0.0"
