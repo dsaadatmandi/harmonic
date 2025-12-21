@@ -15,7 +15,7 @@ pub enum SyncStatus {
     Completed,
 }
 
-#[instrument(skip(tx, file_path, config, writer_tx), fields(payload_type = ?std::mem::discriminant(&payload)))]
+#[instrument(skip(payload, tx, file_path, config, writer_tx), fields(payload_type = ?std::mem::discriminant(&payload)))]
 pub async fn handle_sync_payload<S>(
     payload: sync_request::Payload,
     mut tx: S,
