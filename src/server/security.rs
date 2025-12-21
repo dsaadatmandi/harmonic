@@ -22,12 +22,11 @@ pub fn get_identity(config: &Config) -> Result<Identity> {
     } else {
         let simple_cert_pre = vec![
             // adding whatever address is provided by the configuration and local ip address
-            config.socket_addr()?.to_string(),
-            SocketAddr::new(
-            local_ip_address::local_ip().map_err(|e| HarmonicError::CryptoError(e.to_string()))?,
-            config.socket_addr()?.port(),
-        )
-        .to_string()];
+            config.socket_addr()?.ip().to_string(),
+            local_ip_address::local_ip()
+                .map_err(|e| HarmonicError::CryptoError(e.to_string()))?
+                .to_string(),
+        ];
 
         let CertifiedKey { cert, signing_key } = generate_simple_self_signed(simple_cert_pre)
             .map_err(|e| HarmonicError::CryptoError(e.to_string()))?;
