@@ -8,6 +8,10 @@ use crate::proto::{BlockSignatures, Delta, SyncRequest, delta, sync_request};
 use crate::sync::state::{BlockCache, generate_blocks_signatures};
 use crate::utils::{HarmonicError, Result, hash};
 
+// Maximum size for literal data in a single Delta message to avoid exceeding gRPC limits
+// The gRPC limit is 4MB (4194304 bytes). We use 4MB - 64KB for message overhead and safety margin.
+const MAX_LITERAL_CHUNK_SIZE: usize = 4 * 1024 * 1024 - 64 * 1024;
+
 pub fn get_absolute_path(relative_path: &Path, sync_path: &Path) -> Result<PathBuf> {
     if relative_path.is_absolute() {
         return Err(HarmonicError::PathError {
@@ -106,13 +110,8 @@ where
                 let strong_hash = blake3::hash(data_slice);
                 if let Some(index) = strong_checksum.get(strong_hash.as_bytes()) {
                     if !buffer.is_empty() {
-                        tx.send(SyncRequest {
-                            payload: Some(sync_request::Payload::Delta(Delta {
-                                index: buffer_start_index,
-                                instruction: Some(delta::Instruction::Literal(buffer.clone())),
-                            })),
-                        })
-                        .await?;
+                        // Send buffer in chunks if it exceeds MAX_LITERAL_CHUNK_SIZE
+                        send_literal_chunks(tx, &mut buffer, &mut buffer_start_index).await?;
                         buffer.clear();
                     }
 
@@ -146,19 +145,20 @@ where
         buffer.push(data[i]);
         i += 1;
 
+        // If buffer exceeds max chunk size, send it and start a new buffer
+        if buffer.len() >= MAX_LITERAL_CHUNK_SIZE {
+            send_literal_chunks(tx, &mut buffer, &mut buffer_start_index).await?;
+            buffer.clear();
+            buffer_start_index = i as u64;
+        }
+
         if i + block_size <= data.len() {
             buz_hasher.roll(data[i + block_size - 1]);
         }
     }
 
     if !buffer.is_empty() {
-        tx.send(SyncRequest {
-            payload: Some(sync_request::Payload::Delta(Delta {
-                index: buffer_start_index,
-                instruction: Some(delta::Instruction::Literal(buffer)),
-            })),
-        })
-        .await?;
+        send_literal_chunks(tx, &mut buffer, &mut buffer_start_index).await?;
     }
 
     info!("Completed sending deltas for block signatures");
@@ -167,6 +167,34 @@ where
         payload: Some(sync_request::Payload::Complete(true)),
     })
     .await?;
+    Ok(())
+}
+
+/// Helper function to send literal data in chunks to avoid exceeding gRPC message size limits
+async fn send_literal_chunks<S>(
+    tx: &mut S,
+    buffer: &mut Vec<u8>,
+    buffer_start_index: &mut u64,
+) -> Result<()>
+where
+    S: Sink<SyncRequest, Error = HarmonicError> + Unpin + Send,
+{
+    let mut offset = 0;
+    while offset < buffer.len() {
+        let chunk_size = std::cmp::min(MAX_LITERAL_CHUNK_SIZE, buffer.len() - offset);
+        let chunk = buffer[offset..offset + chunk_size].to_vec();
+
+        tx.send(SyncRequest {
+            payload: Some(sync_request::Payload::Delta(Delta {
+                index: *buffer_start_index + offset as u64,
+                instruction: Some(delta::Instruction::Literal(chunk)),
+            })),
+        })
+        .await?;
+
+        offset += chunk_size;
+    }
+
     Ok(())
 }
 
