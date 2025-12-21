@@ -11,6 +11,7 @@ use futures::{SinkExt, StreamExt};
 use harmonic::Config;
 use harmonic::proto::Delta;
 use harmonic::proto::SyncRequest;
+use harmonic::server::config::create_server_config;
 use harmonic::server::get_server_tls_config;
 use harmonic::sync::handler::SyncStatus;
 use harmonic::sync::handler::handle_sync_payload;
@@ -118,7 +119,8 @@ impl Harmonic for HarmonicService {
         tracing::Span::current().record("session_uuid", tracing::field::display(&session_uuid));
 
         // check session
-        let _session = self.sync_sessions
+        let _session = self
+            .sync_sessions
             .lock()
             .await
             .get(&session_uuid)
@@ -145,7 +147,7 @@ async fn handle_sync_request_stream(
     config: Config,
 ) -> Result<JoinHandle<Result<()>>> {
     let handle = tokio::spawn(
-        async move { 
+        async move {
             let mut file_path: PathBuf = Default::default();
             let mut writer_tx: Option<Sender<Delta>> = Default::default();
 
@@ -177,7 +179,7 @@ async fn handle_sync_request_stream(
                                     // drop writer_tx first to close the delta writer channel to ensure flush
                                     drop(writer_tx);
                                     drop(tx);
-                                    break
+                                    break;
                                 };
                             }
                             Err(e) => {
@@ -209,7 +211,7 @@ async fn handle_sync_request_stream(
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let config = sync::load_config().context("Failed to load config")?;
+    let config = create_server_config().context("Unable to inject server address into config.")?;
 
     tracing_orchestrator(&config.log_level);
 
@@ -227,6 +229,12 @@ async fn main() -> Result<()> {
         .unwrap_or(config.sync_path.join(".harmonic"))
         .join("certificate.crt");
 
+    let bootstrap_address = {
+        let mut addr = address;
+        addr.set_port(42070);
+        addr
+    };
+
     let harmonic = HarmonicService {
         sync_sessions: Arc::new(Mutex::new(HashMap::new())),
         config,
@@ -242,7 +250,8 @@ async fn main() -> Result<()> {
     debug!("Building server");
 
     let main_server = Server::builder()
-        .tls_config(tls_config).context("Error in adding tls layer")?
+        .tls_config(tls_config)
+        .context("Error in adding tls layer")?
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_grpc().make_span_with(make_span))
@@ -253,8 +262,8 @@ async fn main() -> Result<()> {
 
     info!("Main server started on {}", address);
 
-    info!("Starting bootstrap server on port 42070");
-    let bootstrap_server = harmonic::server::run_bootstrap_server(cert_path);
+    info!("Starting bootstrap server on {}", bootstrap_address);
+    let bootstrap_server = harmonic::server::run_bootstrap_server(cert_path, bootstrap_address);
 
     // using select so if either fails, the other shuts down
     tokio::select! {

@@ -1,4 +1,4 @@
-use std::{fs, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration};
+use std::{fs, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use futures::lock::Mutex;
 use rand::{Rng, distr::Alphanumeric};
@@ -68,9 +68,9 @@ pub fn generate_otp(length: usize) -> String {
         .collect()
 }
 
-pub fn display_otp(otp: &str) {
+pub fn display_otp(otp: &str, addr: &SocketAddr) {
     println!("================================");
-    println!("Bootstrap server running on port: 42070");
+    println!("Bootstrap server running on: {}", addr);
     println!(
         "OTP password to copy self-signed certificate from server: {}",
         otp
@@ -81,14 +81,11 @@ pub fn display_otp(otp: &str) {
     println!("================================");
 }
 
-pub async fn run_bootstrap_server(cert_path: PathBuf) -> Result<()> {
+pub async fn run_bootstrap_server(cert_path: PathBuf, bootstrap_addr: SocketAddr) -> Result<()> {
     let otp = generate_otp(64);
-    display_otp(&otp);
+    display_otp(&otp, &bootstrap_addr);
 
     let bootstrap_service = BootstrapServer::new(BootstrapService::new(cert_path, otp));
-
-    let bootstrap_addr = SocketAddr::from_str("[::1]:42070")
-        .expect("Failed to parse bootstrap address");
 
     Server::builder()
         .add_service(bootstrap_service)
