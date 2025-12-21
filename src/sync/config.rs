@@ -112,7 +112,7 @@ fn handle_no_config() -> Result<Config> {
     println!(
         "Please enter the address your server should listen on / your client should connect to:"
     );
-    println!("Valid formats include: [::1]:PORT, IP:PORT, localhost:PORT");
+    println!("Valid formats include: IP:PORT and [::1]:PORT");
     io::stdin()
         .read_line(&mut address)
         .expect("Failed to read input for address");
