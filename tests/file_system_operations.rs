@@ -741,4 +741,85 @@ async fn test_large_file_multiple_blocks() {
     assert_eq!(&written_content[2048..3072], &block3[..]);
 }
 
+#[tokio::test]
+async fn test_very_large_file_chunking() {
+    // This test verifies that very large files (>4MB) don't exceed gRPC message size limits
+    // when transferred with empty signatures (worst case: entire file as literal data)
+    use harmonic::proto::BlockSignatures;
+    use futures::{SinkExt, StreamExt};
+    use std::io::Write;
+
+    // Create a temp file larger than the gRPC limit (4MB)
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+
+    // Create a 5MB file to exceed the 4MB gRPC limit
+    let file_size = 5 * 1024 * 1024; // 5MB
+    let data: Vec<u8> = (0..file_size).map(|i| (i % 256) as u8).collect();
+    temp_file.write_all(&data).unwrap();
+    let file_path = temp_file.path().to_path_buf();
+
+    // Use empty signatures to force entire file to be sent as literal chunks
+    let signatures = BlockSignatures {
+        block_size: 8192,
+        blocks: vec![],
+    };
+
+    let (tx, mut rx) = futures::channel::mpsc::channel(100);
+    let mut sink = tx.sink_map_err(|e| harmonic::utils::HarmonicError::SendError(e.to_string()));
+
+    // Send the delta in a background task
+    let send_task = tokio::spawn(async move {
+        harmonic::sync::transfer::send_delta_from_block_signatures(&file_path, signatures, &mut sink).await
+    });
+
+    // Collect all messages
+    let mut messages = vec![];
+    while let Some(msg) = rx.next().await {
+        messages.push(msg);
+    }
+
+    // Wait for task to complete
+    let result = send_task.await.unwrap();
+    assert!(result.is_ok(), "send_delta_from_block_signatures should succeed");
+
+    // gRPC message size limit (with overhead subtracted)
+    const MAX_LITERAL_CHUNK_SIZE: usize = 4 * 1024 * 1024 - 64 * 1024;
+
+    // Verify that:
+    // 1. We received multiple Delta messages with literal chunks
+    // 2. Each literal chunk is <= MAX_LITERAL_CHUNK_SIZE
+    // 3. The last message is Complete
+    // 4. Total bytes equals original file size
+    let mut total_literal_bytes = 0;
+    let mut literal_count = 0;
+
+    for msg in &messages[..messages.len() - 1] {
+        // All but last should be Delta messages
+        if let Some(sync_request::Payload::Delta(delta)) = &msg.payload {
+            if let Some(harmonic::proto::delta::Instruction::Literal(literal)) = &delta.instruction {
+                assert!(
+                    literal.len() <= MAX_LITERAL_CHUNK_SIZE,
+                    "Literal chunk size {} exceeds MAX_LITERAL_CHUNK_SIZE {} - this would fail with gRPC!",
+                    literal.len(),
+                    MAX_LITERAL_CHUNK_SIZE
+                );
+                total_literal_bytes += literal.len();
+                literal_count += 1;
+            }
+        }
+    }
+
+    // Verify last message is Complete
+    assert!(matches!(
+        messages.last().unwrap().payload,
+        Some(sync_request::Payload::Complete(true))
+    ), "Last message should be Complete");
+
+    // Verify we received the correct total amount of data
+    assert_eq!(total_literal_bytes, file_size, "Total literal bytes should equal file size");
+
+    // Verify we had multiple chunks (file was larger than one chunk)
+    assert!(literal_count >= 2, "Expected at least 2 literal chunks for 5MB file, got {}", literal_count);
+}
+
 
