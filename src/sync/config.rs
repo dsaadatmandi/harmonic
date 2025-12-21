@@ -29,7 +29,7 @@ impl Default for Config {
             sync_path: PathBuf::from(
                 dirs::home_dir().expect("Determination of home dir should never fail"),
             ),
-            socket_addr: String::from("[::1]:42069"),
+            socket_addr: String::from("[::1]:42069"), // server overwrites this with localhost, uses same port
             schedule_delay: 3600,
             log_level: String::from("info"),
             sync_threshold: 20,
@@ -112,7 +112,7 @@ fn handle_no_config() -> Result<Config> {
     println!(
         "Please enter the address your server should listen on / your client should connect to:"
     );
-    println!("Valid formats include: [::1]:PORT, IP:PORT");
+    println!("Valid formats include: [::1]:PORT, IP:PORT, localhost:PORT");
     io::stdin()
         .read_line(&mut address)
         .expect("Failed to read input for address");
