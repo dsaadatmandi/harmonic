@@ -22,7 +22,7 @@ pub fn get_identity(config: &Config) -> Result<Identity> {
         fs::write(cert_path, cert.pem())?;
         fs::write(private_key_path, signing_key.serialize_pem())?;
 
-        Ok(Identity::from_pem(cert.pem(), signing_key.public_key_pem()))
+        Ok(Identity::from_pem(cert.pem(), signing_key.serialize_pem()))
     }
 }
 
