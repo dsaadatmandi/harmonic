@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use clap::Parser;
 use harmonic::proto::{FileAction, FileStatus};
 use harmonic::sync::handler::{SyncStatus, handle_sync_payload};
 use harmonic::utils::HarmonicError;
@@ -6,7 +7,6 @@ use harmonic::utils::tracing::{send_trace, tracing_orchestrator};
 use harmonic::utils::writer::delta_writer;
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use clap::Parser;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +61,6 @@ static CONFIG: Lazy<Config> = Lazy::new(|| sync::load_config().expect("Failed to
 static FORCE_BOOTSTRAP: AtomicBool = AtomicBool::new(false);
 
 static CERT: OnceCell<Certificate> = OnceCell::const_new();
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
