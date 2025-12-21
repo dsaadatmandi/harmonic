@@ -10,6 +10,7 @@ use clap::Parser;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::Sender;
 use tonic::codec::CompressionEncoding;
 use tracing::instrument::Instrumented;
@@ -55,13 +56,12 @@ const QUEUE_CHECK_SEC_INTERVAL_SEC: u64 = 10;
 static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> =
     Lazy::new(|| Arc::new(Mutex::new(VecDeque::new())));
 
-static CONFIG: OnceCell<Config> = OnceCell::const_new();
+static CONFIG: Lazy<Config> = Lazy::new(|| sync::load_config().expect("Failed to load config"));
+
+static FORCE_BOOTSTRAP: AtomicBool = AtomicBool::new(false);
 
 static CERT: OnceCell<Certificate> = OnceCell::const_new();
 
-fn config() -> &'static Config {
-    CONFIG.get().expect("CONFIG not initialized")
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -69,24 +69,18 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let config = sync::load_config()
-        .context("Failed to load config")?
-        .with_force_bootstrap(args.bootstrap);
+    FORCE_BOOTSTRAP.store(args.bootstrap, Ordering::Relaxed);
 
-    CONFIG.set(config).expect("CONFIG already initialized");
+    tracing_orchestrator(&CONFIG.log_level);
 
-    let config = CONFIG.get().expect("CONFIG not initialized");
-
-    tracing_orchestrator(&config.log_level);
-
-    let p = PathBuf::from(&config.sync_path);
+    let p = PathBuf::from(&CONFIG.sync_path);
 
     if args.event_based {
-        let _watcher_task = start_watcher(p, config);
+        let _watcher_task = start_watcher(p, &CONFIG);
     }
 
     if args.schedule {
-        let _scheduler_task = start_scheduler(config);
+        let _scheduler_task = start_scheduler(&CONFIG);
     }
 
     let manual = !args.event_based && !args.schedule;
@@ -142,7 +136,7 @@ async fn run_sync() -> Result<()> {
         tonic::transport::ClientTlsConfig::new().ca_certificate(get_cert().await.clone());
 
     let channel = Channel::builder(
-        config()
+        CONFIG
             .server_uri()
             .parse()
             .context("Unable to convert address to URI")?,
@@ -160,7 +154,7 @@ async fn run_sync() -> Result<()> {
 
     let last_state = sync::load_state().context("Unable to load previous state")?;
     let now_state =
-        sync::generate_state(&config().sync_path, true).context("Failed to generate state")?;
+        sync::generate_state(&CONFIG.sync_path, true).context("Failed to generate state")?;
     let diffs = sync::compare_states(&last_state, &now_state);
 
     // wont check with server which is not ideal
@@ -184,7 +178,7 @@ async fn run_sync() -> Result<()> {
         client.clone(),
         files_to_send,
         &sync_uuid,
-        config().sync_path.clone(),
+        CONFIG.sync_path.clone(),
     )
     .await;
     match result {
@@ -313,7 +307,7 @@ where
 
         if file_path.exists() {
             let _ = harmonic::sync::transfer::send_block_signatures_for_file(
-                &file_path, &mut sink, config(),
+                &file_path, &mut sink, &CONFIG,
             )
             .await;
         } else {
@@ -322,7 +316,7 @@ where
                 .send(SyncRequest {
                     payload: Some(harmonic::proto::sync_request::Payload::Signatures(
                         harmonic::proto::BlockSignatures {
-                            block_size: config().block_size,
+                            block_size: CONFIG.block_size,
                             blocks: vec![],
                         },
                     )),
@@ -337,7 +331,7 @@ where
         if file_path.exists() {
             debug!("File exists, generating block signatures");
             let (_sig, cache) =
-                harmonic::sync::state::generate_blocks_signatures(&file_path, config())
+                harmonic::sync::state::generate_blocks_signatures(&file_path, &CONFIG)
                     .await
                     .unwrap_or((
                         harmonic::proto::BlockSignatures::default(),
@@ -376,7 +370,7 @@ where
                         payload,
                         sink,
                         &mut file_path,
-                        config().clone(),
+                        CONFIG.clone(),
                         &mut writer_tx,
                     )
                     .await
@@ -453,14 +447,18 @@ fn should_trigger_sync(score: u64, config: &sync::Config) -> bool {
 
 async fn get_cert() -> &'static Certificate {
     CERT.get_or_init(|| async {
-        if config().force_bootstrap {
-            bootstrap_from_server(&config().socket_addr)
+        if FORCE_BOOTSTRAP.load(Ordering::Relaxed) {
+            let cert = bootstrap_from_server(&CONFIG.socket_addr)
                 .await
-                .expect("Failed to bootstrap certificate from server")
+                .expect("Failed to bootstrap certificate from server");
+
+            FORCE_BOOTSTRAP.store(false, Ordering::Relaxed);
+
+            cert
         } else {
             match load_cert() {
                 Ok(c) => c,
-                Err(_) => bootstrap_from_server(&config().socket_addr)
+                Err(_) => bootstrap_from_server(&CONFIG.socket_addr)
                     .await
                     .expect("Failed to bootstrap certificate from server"),
             }
