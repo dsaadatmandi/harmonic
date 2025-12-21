@@ -298,13 +298,14 @@ where
     .await
     .map_err(|e| HarmonicError::SendError(e.to_string()))?;
 
-    let mut file_path = sync_path.join(&action.path);
+    let mut file_path = PathBuf::from(&action.path);
+    let abs_file_path = sync_path.join(&file_path);
 
     if action.direction == TransferDirection::Download as i32 {
         let mut sink =
             PollSender::new(tx.clone()).sink_map_err(|e| HarmonicError::SendError(e.to_string()));
 
-        if file_path.exists() {
+        if abs_file_path.exists() {
             let _ = harmonic::sync::transfer::send_block_signatures_for_file(
                 &file_path, &mut sink, &CONFIG,
             )
@@ -326,8 +327,8 @@ where
 
     let mut writer_tx: Option<Sender<harmonic::proto::Delta>> = None;
     if action.direction == TransferDirection::Download as i32 {
-        debug!("Download mode: preparing delta writer for {:?}", file_path);
-        if file_path.exists() {
+        debug!("Download mode: preparing delta writer for {:?}", abs_file_path);
+        if abs_file_path.exists() {
             debug!("File exists, generating block signatures");
             let (_sig, cache) =
                 harmonic::sync::state::generate_blocks_signatures(&file_path, &CONFIG)
@@ -338,7 +339,7 @@ where
                     ));
             writer_tx = Some(
                 delta_writer(
-                    &file_path,
+                    &abs_file_path,
                     cache,
                     action.timestamp_latest_modified.unwrap_or_default(),
                 )
@@ -348,7 +349,7 @@ where
             debug!("File doesn't exist, creating delta writer with empty cache");
             writer_tx = Some(
                 delta_writer(
-                    &file_path,
+                    &abs_file_path,
                     harmonic::sync::state::BlockCache { blocks: vec![] },
                     action.timestamp_latest_modified.unwrap_or_default(),
                 )
@@ -396,7 +397,7 @@ where
     // same as server - to fix if possible although overhead is once per sync, not per file. hence small
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    info!("Completed sync for {:?}", &file_path);
+    info!("Completed sync for {:?}", &abs_file_path);
 
     Ok(())
 }
@@ -513,5 +514,118 @@ mod tests {
         assert!(should_trigger_sync(config.sync_threshold + 1, &config));
         assert!(!should_trigger_sync(config.sync_threshold - 1, &config));
         assert!(!should_trigger_sync(0, &config));
+    }
+
+    #[test]
+    fn test_file_path_is_relative() {
+        // Test that file_path initialization creates a relative path, not absolute
+        let action_path = "test/file.txt";
+        let file_path = PathBuf::from(action_path);
+
+        assert!(!file_path.is_absolute(), "file_path should be relative, not absolute");
+        assert_eq!(file_path.to_str().unwrap(), action_path);
+    }
+
+    #[test]
+    fn test_abs_file_path_construction() {
+        // Test that abs_file_path is correctly constructed from sync_path + relative path
+        let sync_path = PathBuf::from("/Users/test/sync");
+        let action_path = "test/file.txt";
+        let file_path = PathBuf::from(action_path);
+        let abs_file_path = sync_path.join(&file_path);
+
+        assert!(abs_file_path.is_absolute(), "abs_file_path should be absolute");
+        assert_eq!(abs_file_path.to_str().unwrap(), "/Users/test/sync/test/file.txt");
+    }
+
+    #[test]
+    fn test_relative_path_with_get_absolute_path() {
+        // Test that relative paths work correctly with get_absolute_path
+        use harmonic::sync::transfer::get_absolute_path;
+        use std::path::Path;
+
+        let sync_path = Path::new("/Users/test/sync");
+        let relative_path = Path::new("test/file.txt");
+
+        let result = get_absolute_path(relative_path, sync_path);
+        assert!(result.is_ok(), "get_absolute_path should accept relative paths");
+
+        let abs = result.unwrap();
+        assert!(abs.is_absolute());
+        assert!(abs.to_str().unwrap().ends_with("test/file.txt"));
+    }
+
+    #[test]
+    fn test_absolute_path_rejected_by_get_absolute_path() {
+        // Test that absolute paths are rejected by get_absolute_path (security check)
+        use harmonic::sync::transfer::get_absolute_path;
+        use std::path::Path;
+
+        let sync_path = Path::new("/Users/test/sync");
+        let absolute_path = Path::new("/Users/test/sync/test/file.txt");
+
+        let result = get_absolute_path(absolute_path, sync_path);
+        assert!(result.is_err(), "get_absolute_path should reject absolute paths for security");
+    }
+
+    #[test]
+    fn test_path_traversal_rejected_by_get_absolute_path() {
+        // Test that path traversal attempts are rejected
+        use harmonic::sync::transfer::get_absolute_path;
+        use std::path::Path;
+
+        let sync_path = Path::new("/Users/test/sync");
+        let traversal_path = Path::new("../../../etc/passwd");
+
+        let result = get_absolute_path(traversal_path, sync_path);
+        assert!(result.is_err(), "get_absolute_path should reject path traversal attempts");
+    }
+
+    #[tokio::test]
+    async fn test_empty_file_path_handling() {
+        // Test path handling for empty files (the original bug scenario)
+        use harmonic::sync::state::generate_blocks_signatures;
+
+        let config = sync::Config::default();
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("harmonic_test_empty.txt");
+
+        // Create an empty file
+        std::fs::write(&test_file, b"").expect("Failed to create test file");
+
+        // Get relative path
+        let relative_path = PathBuf::from("harmonic_test_empty.txt");
+
+        // This should work with relative path
+        let mut test_config = config.clone();
+        test_config.sync_path = temp_dir.clone();
+
+        let result = generate_blocks_signatures(&relative_path, &test_config).await;
+        assert!(result.is_ok(), "generate_blocks_signatures should work with relative path");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&test_file);
+    }
+
+    #[tokio::test]
+    async fn test_nonexistent_file_path_handling() {
+        // Test path handling for non-existent files
+        use harmonic::sync::state::generate_blocks_signatures;
+
+        let config = sync::Config::default();
+        let temp_dir = std::env::temp_dir();
+
+        // Get relative path for non-existent file
+        let relative_path = PathBuf::from("harmonic_test_nonexistent_file_12345.txt");
+
+        let mut test_config = config.clone();
+        test_config.sync_path = temp_dir.clone();
+
+        let result = generate_blocks_signatures(&relative_path, &test_config).await;
+        assert!(result.is_ok(), "generate_blocks_signatures should handle non-existent files");
+
+        let (signatures, cache) = result.unwrap();
+        assert_eq!(signatures.blocks.len(), 0, "Non-existent file should have no blocks");
+        assert_eq!(cache.blocks.len(), 0, "Non-existent file should have empty cache");
     }
 }
