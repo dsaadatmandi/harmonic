@@ -76,7 +76,7 @@ pub fn display_otp(otp: &str, addr: &SocketAddr) {
         otp
     );
     println!(
-        "Enter this on the client after startup. To overwrite existing cert, run client with --cert flag"
+        "Enter this on the client after startup. To overwrite existing cert, run client with --bootstrap flag"
     );
     println!("================================");
 }

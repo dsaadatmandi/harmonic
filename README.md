@@ -14,12 +14,11 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 **Security Improvements** ✅
 
 **Performance Enhancements**
-- [ ] Add zero-copy I/O optimizations -> this should be implemented, particularly for larger files. use Bytes type?
+- [ ] Add zero-copy optimizations -> this should be implemented, particularly for larger files. use Bytes type?
 
 **Usability**
 
 - [ ] Implement graceful shutdown handling
-- [ ] Improve cli functionality -> allow more config to be directly passed as args
 
 **Configurability** ✅
 
@@ -41,6 +40,8 @@ A high-performance distributed file synchronization system built with Rust, gRPC
 - [x] Improve error handling and propagation -> thiserror + anyhow
 - [x] Better initial setup cli guidance -> prompt user to enter certain config rather than referring to config file?
 - [x] Improve tracing - currently a bit hard to follow. Improve how traces and spans are captured and what is instrumented
+- [x] Improve cli functionality -> allow more config to be directly passed as args
+
 
 **Out of scope**
 - 💤 Investigate complexity of authentication/authorization (token-based or mTLS)
