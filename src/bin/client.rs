@@ -55,9 +55,13 @@ const QUEUE_CHECK_SEC_INTERVAL_SEC: u64 = 10;
 static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> =
     Lazy::new(|| Arc::new(Mutex::new(VecDeque::new())));
 
-static CONFIG: Lazy<Config> = Lazy::new(|| sync::load_config().expect("Failed to load config"));
+static CONFIG: OnceCell<Config> = OnceCell::const_new();
 
 static CERT: OnceCell<Certificate> = OnceCell::const_new();
+
+fn config() -> &'static Config {
+    CONFIG.get().expect("CONFIG not initialized")
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -65,16 +69,24 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    tracing_orchestrator(&CONFIG.log_level);
+    let config = sync::load_config()
+        .context("Failed to load config")?
+        .with_force_bootstrap(args.bootstrap);
 
-    let p = PathBuf::from(&CONFIG.sync_path);
+    CONFIG.set(config).expect("CONFIG already initialized");
+
+    let config = CONFIG.get().expect("CONFIG not initialized");
+
+    tracing_orchestrator(&config.log_level);
+
+    let p = PathBuf::from(&config.sync_path);
 
     if args.event_based {
-        let _watcher_task = start_watcher(p, &CONFIG);
+        let _watcher_task = start_watcher(p, config);
     }
 
     if args.schedule {
-        let _scheduler_task = start_scheduler(&CONFIG);
+        let _scheduler_task = start_scheduler(config);
     }
 
     let manual = !args.event_based && !args.schedule;
@@ -130,7 +142,7 @@ async fn run_sync() -> Result<()> {
         tonic::transport::ClientTlsConfig::new().ca_certificate(get_cert().await.clone());
 
     let channel = Channel::builder(
-        CONFIG
+        config()
             .server_uri()
             .parse()
             .context("Unable to convert address to URI")?,
@@ -148,7 +160,7 @@ async fn run_sync() -> Result<()> {
 
     let last_state = sync::load_state().context("Unable to load previous state")?;
     let now_state =
-        sync::generate_state(&CONFIG.sync_path, true).context("Failed to generate state")?;
+        sync::generate_state(&config().sync_path, true).context("Failed to generate state")?;
     let diffs = sync::compare_states(&last_state, &now_state);
 
     // wont check with server which is not ideal
@@ -172,7 +184,7 @@ async fn run_sync() -> Result<()> {
         client.clone(),
         files_to_send,
         &sync_uuid,
-        CONFIG.sync_path.clone(),
+        config().sync_path.clone(),
     )
     .await;
     match result {
@@ -301,7 +313,7 @@ where
 
         if file_path.exists() {
             let _ = harmonic::sync::transfer::send_block_signatures_for_file(
-                &file_path, &mut sink, &CONFIG,
+                &file_path, &mut sink, config(),
             )
             .await;
         } else {
@@ -310,7 +322,7 @@ where
                 .send(SyncRequest {
                     payload: Some(harmonic::proto::sync_request::Payload::Signatures(
                         harmonic::proto::BlockSignatures {
-                            block_size: CONFIG.block_size,
+                            block_size: config().block_size,
                             blocks: vec![],
                         },
                     )),
@@ -325,7 +337,7 @@ where
         if file_path.exists() {
             debug!("File exists, generating block signatures");
             let (_sig, cache) =
-                harmonic::sync::state::generate_blocks_signatures(&file_path, &CONFIG)
+                harmonic::sync::state::generate_blocks_signatures(&file_path, config())
                     .await
                     .unwrap_or((
                         harmonic::proto::BlockSignatures::default(),
@@ -364,7 +376,7 @@ where
                         payload,
                         sink,
                         &mut file_path,
-                        CONFIG.clone(),
+                        config().clone(),
                         &mut writer_tx,
                     )
                     .await
@@ -441,11 +453,17 @@ fn should_trigger_sync(score: u64, config: &sync::Config) -> bool {
 
 async fn get_cert() -> &'static Certificate {
     CERT.get_or_init(|| async {
-        match load_cert() {
-            Ok(c) => c,
-            Err(_) => bootstrap_from_server(&CONFIG.socket_addr)
+        if config().force_bootstrap {
+            bootstrap_from_server(&config().socket_addr)
                 .await
-                .expect("Failed to bootstrap certificate from server"),
+                .expect("Failed to bootstrap certificate from server")
+        } else {
+            match load_cert() {
+                Ok(c) => c,
+                Err(_) => bootstrap_from_server(&config().socket_addr)
+                    .await
+                    .expect("Failed to bootstrap certificate from server"),
+            }
         }
     })
     .await
