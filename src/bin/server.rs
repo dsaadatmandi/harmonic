@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -211,19 +210,20 @@ async fn handle_sync_request_stream(
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let config = create_server_config().context("Unable to inject server address into config.")?;
+    let config = sync::load_config().context("Failed to load config")?;
 
     tracing_orchestrator(&config.log_level);
 
     info!("Starting server");
 
     debug!("Address from config: {:?}", config.socket_addr);
-    let address: SocketAddr = config
-        .socket_addr
-        .parse()
-        .context("Somehow could not parse address..?")?;
 
     let tls_config = get_server_tls_config(&config)?;
+
+    // overwrite above values with new.
+    debug!("Injecting local address into config for serving");
+    let config = create_server_config().context("Unable to inject server address into config.")?;
+    let address = config.socket_addr()?;
 
     let cert_path = config_dir_path()
         .unwrap_or(config.sync_path.join(".harmonic"))
