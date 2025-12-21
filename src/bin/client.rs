@@ -45,6 +45,8 @@ static CERT: OnceCell<Certificate> = OnceCell::const_new();
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tracing_orchestrator(&CONFIG.log_level);
 
     let p = PathBuf::from(&CONFIG.sync_path);

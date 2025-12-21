@@ -207,6 +207,8 @@ async fn handle_sync_request_stream(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let config = sync::load_config().context("Failed to load config")?;
 
     tracing_orchestrator(&config.log_level);
@@ -237,8 +239,10 @@ async fn main() -> Result<()> {
         .send_compressed(CompressionEncoding::Zstd)
         .accept_compressed(CompressionEncoding::Zstd);
 
+    debug!("Building server");
+
     let main_server = Server::builder()
-        .tls_config(tls_config)?
+        .tls_config(tls_config).context("Error in adding tls layer")?
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_grpc().make_span_with(make_span))
