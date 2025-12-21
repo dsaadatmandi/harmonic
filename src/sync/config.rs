@@ -43,7 +43,7 @@ impl Default for Config {
 
 impl Config {
     pub fn server_uri(&self) -> String {
-        format!("http://{}", self.socket_addr)
+        format!("https://{}", self.socket_addr)
     }
 }
 
