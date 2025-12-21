@@ -135,7 +135,7 @@ impl Harmonic for HarmonicService {
             .ok_or_else(|| Status::not_found("Session not found"))?;
 
         let request_stream = request.into_inner();
-        let (tx, rx) = mpsc::channel::<Result<SyncRequest, Status>>(10);
+        let (tx, rx) = mpsc::channel::<Result<SyncRequest, Status>>(256);
 
         handle_sync_request_stream(request_stream, tx, self.config.clone())
             .await

@@ -19,7 +19,7 @@ pub async fn delta_writer(
     cache: BlockCache,
     modified_ts: prost_types::Timestamp,
 ) -> Sender<Delta> {
-    let (tx, mut rx) = mpsc::channel::<Delta>(100);
+    let (tx, mut rx) = mpsc::channel::<Delta>(512);
     let path_clone = path.clone();
 
     tokio::spawn(async move {
