@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::prelude::*;
+use clap::Parser;
 
 use futures::{SinkExt, StreamExt};
 use harmonic::Config;
@@ -37,6 +38,14 @@ use harmonic::proto::{
     harmonic_server::{Harmonic, HarmonicServer},
 };
 use harmonic::sync::{self, SyncState, config::config_dir_path};
+
+#[derive(Parser, Debug)]
+#[command(name = "harmonic-server")]
+#[command(about = "Harmonic file synchronization server", long_about = None)]
+struct Args {
+    #[arg(long)]
+    bootstrap: bool,
+}
 
 #[derive(Clone, Debug)]
 struct SessionData {
@@ -210,6 +219,8 @@ async fn handle_sync_request_stream(
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let args = Args::parse();
+
     let config = sync::load_config().context("Failed to load config")?;
 
     tracing_orchestrator(&config.log_level);
@@ -218,7 +229,7 @@ async fn main() -> Result<()> {
 
     debug!("Address from config: {:?}", config.socket_addr);
 
-    let tls_config = get_server_tls_config(&config)?;
+    let (tls_config, generated_cert) = get_server_tls_config(&config)?;
 
     // overwrite above values with new.
     debug!("Injecting local address into config for serving");
@@ -262,20 +273,23 @@ async fn main() -> Result<()> {
 
     info!("Main server started on {}", address);
 
-    info!("Starting bootstrap server on {}", bootstrap_address);
-    let bootstrap_server = harmonic::server::run_bootstrap_server(cert_path, bootstrap_address);
+    // run bootstrap if --bootstrap arg or certificate was generated this run
+    let should_run_bootstrap = args.bootstrap || generated_cert;
 
-    // using select so if either fails, the other shuts down
-    tokio::select! {
-        result = main_server => {
-            result?;
-            info!("Main server stopped");
-        }
-        result = bootstrap_server => {
-            result?;
-            info!("Bootstrap server stopped");
-        }
+    if should_run_bootstrap {
+        info!("Starting bootstrap server on {}", bootstrap_address);
+        tokio::spawn(async move {
+            match harmonic::server::run_bootstrap_server(cert_path, bootstrap_address).await {
+                Ok(()) => info!("Bootstrap server stopped"),
+                Err(e) => error!("Bootstrap server failed: {:?}", e),
+            }
+        });
+    } else {
+        info!("Bootstrap server disabled. Use --bootstrap flag to enable.");
     }
+
+    main_server.await?;
+    info!("Main server stopped");
 
     Ok(())
 }

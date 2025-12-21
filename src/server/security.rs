@@ -1,4 +1,4 @@
-use std::{fs, net::SocketAddr};
+use std::{fs};
 
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use tonic::transport::{Identity, ServerTlsConfig};
@@ -9,7 +9,7 @@ use crate::{
     utils::{HarmonicError, Result},
 };
 
-pub fn get_identity(config: &Config) -> Result<Identity> {
+pub fn get_identity(config: &Config) -> Result<(Identity, bool)> {
     let config_dir = config_dir_path().unwrap_or(config.sync_path.join(".harmonic"));
     let cert_path = config_dir.join("certificate.crt");
     let private_key_path = config_dir.join("certificate.pk");
@@ -18,7 +18,7 @@ pub fn get_identity(config: &Config) -> Result<Identity> {
         let cert = fs::read(cert_path)?;
         let key = fs::read(private_key_path)?;
 
-        Ok(Identity::from_pem(cert, key))
+        Ok((Identity::from_pem(cert, key), false))
     } else {
         let simple_cert_pre = vec![
             // adding whatever address is provided by the configuration and local ip address
@@ -33,11 +33,11 @@ pub fn get_identity(config: &Config) -> Result<Identity> {
         fs::write(cert_path, cert.pem())?;
         fs::write(private_key_path, signing_key.serialize_pem())?;
 
-        Ok(Identity::from_pem(cert.pem(), signing_key.serialize_pem()))
+        Ok((Identity::from_pem(cert.pem(), signing_key.serialize_pem()), true))
     }
 }
 
-pub fn get_server_tls_config(config: &Config) -> Result<ServerTlsConfig> {
-    let identity = get_identity(&config)?;
-    Ok(ServerTlsConfig::new().identity(identity))
+pub fn get_server_tls_config(config: &Config) -> Result<(ServerTlsConfig, bool)> {
+    let (identity, was_generated) = get_identity(&config)?;
+    Ok((ServerTlsConfig::new().identity(identity), was_generated))
 }

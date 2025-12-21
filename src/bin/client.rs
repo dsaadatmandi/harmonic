@@ -6,6 +6,7 @@ use harmonic::utils::tracing::{send_trace, tracing_orchestrator};
 use harmonic::utils::writer::delta_writer;
 use std::collections::VecDeque;
 use std::fmt::Debug;
+use clap::Parser;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,6 +35,21 @@ use harmonic::sync::{self, Config};
 
 use harmonic::proto::SyncRequest;
 
+#[derive(Parser, Debug)]
+#[command(name = "harmonic-client")]
+#[command(about = "Harmonic file synchronization client", long_about = None)]
+struct Args {
+    /// Bootstrap certificate from server
+    #[arg(long)]
+    bootstrap: bool,
+    /// Use schedule-based sync mode
+    #[arg(long)]
+    schedule: bool,
+    /// Use event-based sync mode
+    #[arg(long)]
+    event_based: bool,
+}
+
 const QUEUE_CHECK_SEC_INTERVAL_SEC: u64 = 10;
 
 static QUEUE: Lazy<Arc<Mutex<VecDeque<bool>>>> =
@@ -47,18 +63,23 @@ static CERT: OnceCell<Certificate> = OnceCell::const_new();
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    let args = Args::parse();
+
     tracing_orchestrator(&CONFIG.log_level);
 
     let p = PathBuf::from(&CONFIG.sync_path);
 
-    #[cfg(feature = "event-based")]
-    let _watcher_task = start_watcher(p, &CONFIG);
+    if args.event_based {
+        let _watcher_task = start_watcher(p, &CONFIG);
+    }
 
-    #[cfg(feature = "schedule-based")]
-    let _scheduler_task = start_scheduler(&CONFIG);
+    if args.schedule {
+        let _scheduler_task = start_scheduler(&CONFIG);
+    }
 
-    #[cfg(feature = "manual-only")]
-    {
+    let manual = !args.event_based && !args.schedule;
+
+    if manual {
         info!("Triggering manual sync");
         let result = trigger_sync_task()
             .await
@@ -69,10 +90,7 @@ async fn main() -> Result<()> {
 
         result?;
         Ok(())
-    }
-
-    #[cfg(not(feature = "manual-only"))]
-    {
+    } else {
         let mut queue_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(
             QUEUE_CHECK_SEC_INTERVAL_SEC,
         ));
@@ -433,7 +451,6 @@ async fn get_cert() -> &'static Certificate {
     .await
 }
 
-#[cfg(feature = "schedule-based")]
 fn start_scheduler(config: &sync::Config) -> Instrumented<JoinHandle<()>> {
     debug!("Starting scheduler");
     let mut delay_interval =
