@@ -15,7 +15,6 @@ pub struct Config {
     pub socket_addr: String,
     pub schedule_delay: u64,
     pub log_level: String,
-    pub force_bootstrap: bool,
 
     pub sync_threshold: u64,
     pub modify_weight: u64,
@@ -34,7 +33,6 @@ impl Default for Config {
             socket_addr: String::from("[::1]:42069"), // server overwrites this with localhost, uses same port
             schedule_delay: 3600,
             log_level: String::from("info"),
-            force_bootstrap: false,
             sync_threshold: 20,
             modify_weight: 2,
             remove_weight: 5,
@@ -53,12 +51,6 @@ impl Config {
         self.socket_addr
             .parse()
             .map_err(|_| HarmonicError::ConfigError)
-    }
-
-    /// Builder method to override force_bootstrap from CLI args
-    pub fn with_force_bootstrap(mut self, force: bool) -> Self {
-        self.force_bootstrap = force;
-        self
     }
 }
 
@@ -165,7 +157,6 @@ mod tests {
             sync_path: PathBuf::from("/tmp/test"),
             socket_addr: String::from("192.168.1.100:42069"),
             log_level: String::from("debug"),
-            force_bootstrap: false,
             schedule_delay: 3600,
             sync_threshold: 20,
             modify_weight: 2,
@@ -175,7 +166,7 @@ mod tests {
         };
 
         let uri = config.server_uri();
-        assert_eq!(uri, "http://192.168.1.100:42069");
+        assert_eq!(uri, "https://192.168.1.100:42069");
 
         // Verify the original socket_addr can still be parsed as SocketAddr
         let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
@@ -189,7 +180,6 @@ mod tests {
             socket_addr: String::from("[::1]:42069"),
             schedule_delay: 3600,
             log_level: String::from("debug"),
-            force_bootstrap: false,
             sync_threshold: 20,
             modify_weight: 2,
             remove_weight: 5,
@@ -198,7 +188,7 @@ mod tests {
         };
 
         let uri = config.server_uri();
-        assert_eq!(uri, "http://[::1]:42069");
+        assert_eq!(uri, "https://[::1]:42069");
 
         // Verify the original socket_addr can still be parsed as SocketAddr
         let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
@@ -212,7 +202,6 @@ mod tests {
             socket_addr: String::from("[::]:42069"),
             schedule_delay: 3600,
             log_level: String::from("debug"),
-            force_bootstrap: false,
             sync_threshold: 20,
             modify_weight: 2,
             remove_weight: 5,
@@ -221,7 +210,7 @@ mod tests {
         };
 
         let uri = config.server_uri();
-        assert_eq!(uri, "http://[::]:42069");
+        assert_eq!(uri, "https://[::]:42069");
 
         // Verify the original socket_addr can still be parsed as SocketAddr
         let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
@@ -234,7 +223,6 @@ mod tests {
             sync_path: PathBuf::from("/tmp/test"),
             socket_addr: String::from("0.0.0.0:42069"),
             log_level: String::from("debug"),
-            force_bootstrap: false,
             schedule_delay: 3600,
             sync_threshold: 20,
             modify_weight: 2,
@@ -244,7 +232,7 @@ mod tests {
         };
 
         let uri = config.server_uri();
-        assert_eq!(uri, "http://0.0.0.0:42069");
+        assert_eq!(uri, "https://0.0.0.0:42069");
 
         // Verify the original socket_addr can still be parsed as SocketAddr
         let socket_addr: std::net::SocketAddr = config.socket_addr.parse().unwrap();
