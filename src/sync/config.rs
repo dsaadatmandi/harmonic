@@ -85,7 +85,7 @@ pub fn load_config() -> Result<Config> {
                 info!("Config file not found. Creating with default values.");
                 let c = handle_no_config()?;
                 info!("Config created. Continuing.");
-            Ok(c)
+                Ok(c)
             }
             _ => Err(HarmonicError::Io(error)),
         },
@@ -103,7 +103,7 @@ fn handle_no_config() -> Result<Config> {
     let mut path = String::new();
     let mut address = String::new();
     println!("No config found! Creating new file...");
-    println!("Please enter the path you would like to Harmonize:\n");
+    println!("Please enter the path you would like to Harmonize:");
     io::stdin()
         .read_line(&mut path)
         .expect("Failed to read input for path");
@@ -112,22 +112,14 @@ fn handle_no_config() -> Result<Config> {
     println!(
         "Please enter the address your server should listen on / your client should connect to:"
     );
-    println!("Valid formats include: [::1]:PORT, IP:PORT\n");
+    println!("Valid formats include: [::1]:PORT, IP:PORT");
     io::stdin()
         .read_line(&mut address)
         .expect("Failed to read input for address");
 
-    let c = Config {
-        sync_path: PathBuf::from(path.trim()),
-        socket_addr: address.trim().to_string(),
-        schedule_delay: Default::default(),
-        log_level: Default::default(),
-        sync_threshold: Default::default(),
-        modify_weight: Default::default(),
-        remove_weight: Default::default(),
-        create_weight: Default::default(),
-        block_size: Default::default(),
-    };
+    let mut c = Config::default();
+    c.sync_path = PathBuf::from(path.trim());
+    c.socket_addr = address.trim().to_string();
 
     println!("Saving config to: {:?}", config_dir_path());
     println!("Please review the config file to find additional configurable properties");
