@@ -445,159 +445,39 @@ fn start_scheduler(config: &sync::Config) -> Instrumented<JoinHandle<()>> {
     .instrument(Span::current())
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use harmonic::proto::FileAction;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-//     use super::*;
+    #[test]
+    fn test_calculate_change_score() {
+        let config = sync::Config::default();
 
-//     #[test]
-//     fn test_handle_response() {
-//         let response: ServerSyncStateResponse = ServerSyncStateResponse {
-//             sync_uuid: String::from("sample-uuid"),
-//             timestamp_micro: 12345,
-//             sync_plan: vec![
-//                 FileAction {
-//                     path: String::from("/file_client_send.txt"),
-//                     direction: TransferDirection::ClientSendFile as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_server_send.txt"),
-//                     direction: TransferDirection::ServerRequestFile as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_skip.txt"),
-//                     direction: TransferDirection::Skip as i32,
-//                 },
-//             ],
-//         };
-//         let generated_actions = handle_response(response);
+        assert_eq!(
+            calculate_change_score(EventKind::Modify(notify::event::ModifyKind::Any), &config),
+            config.modify_weight
+        );
+        assert_eq!(
+            calculate_change_score(EventKind::Remove(notify::event::RemoveKind::Any), &config),
+            config.remove_weight
+        );
+        assert_eq!(
+            calculate_change_score(EventKind::Create(notify::event::CreateKind::Any), &config),
+            config.create_weight
+        );
+        assert_eq!(
+            calculate_change_score(EventKind::Access(notify::event::AccessKind::Any), &config),
+            0
+        );
+    }
 
-//         assert_eq!(generated_actions.len(), 1);
-//         assert_eq!(generated_actions[0], PathBuf::from("/file_client_send.txt"));
-//     }
+    #[test]
+    fn test_should_trigger_sync() {
+        let config = sync::Config::default();
 
-//     #[test]
-//     fn test_handle_response_empty_plan() {
-//         let response: ServerSyncStateResponse = ServerSyncStateResponse {
-//             sync_uuid: String::from("sample-uuid"),
-//             timestamp_micro: 12345,
-//             sync_plan: Vec::new(),
-//         };
-//         let generated_actions = handle_response(response);
-
-//         assert_eq!(generated_actions.len(), 0);
-//     }
-
-//     #[test]
-//     fn test_handle_response_invalid_direction() {
-//         let response: ServerSyncStateResponse = ServerSyncStateResponse {
-//             sync_uuid: String::from("sample-uuid"),
-//             timestamp_micro: 12345,
-//             sync_plan: vec![
-//                 FileAction {
-//                     path: String::from("/file_client_send.txt"),
-//                     direction: TransferDirection::ClientSendFile as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_invalid_direction.txt"),
-//                     direction: 9,
-//                 },
-//             ],
-//         };
-//         let generated_actions = handle_response(response);
-
-//         assert_eq!(generated_actions.len(), 1);
-//         assert_eq!(generated_actions[0], PathBuf::from("/file_client_send.txt"));
-//     }
-
-//     #[test]
-//     fn test_handle_response_complex_many_directions() {
-//         let response: ServerSyncStateResponse = ServerSyncStateResponse {
-//             sync_uuid: String::from("sample-uuid"),
-//             timestamp_micro: 12345,
-//             sync_plan: vec![
-//                 FileAction {
-//                     path: String::from("/file_client_send_1.txt"),
-//                     direction: TransferDirection::ClientSendFile as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_server_send.txt"),
-//                     direction: TransferDirection::ServerRequestFile as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_skip.txt"),
-//                     direction: TransferDirection::Skip as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_client_send_2.txt"),
-//                     direction: TransferDirection::ClientSendFile as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_client_send_3.txt"),
-//                     direction: TransferDirection::ClientSendFile as i32,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_client_send_2.txt"),
-//                     direction: 999,
-//                 },
-//                 FileAction {
-//                     path: String::from("/file_client_send_4.txt"),
-//                     direction: TransferDirection::ClientSendFile as i32,
-//                 },
-//             ],
-//         };
-//         let generated_actions = handle_response(response);
-
-//         assert_eq!(generated_actions.len(), 4);
-//         // note this will probably fail if parallelizing iteration
-//         assert_eq!(
-//             generated_actions[0],
-//             PathBuf::from("/file_client_send_1.txt")
-//         );
-//         assert_eq!(
-//             generated_actions[1],
-//             PathBuf::from("/file_client_send_2.txt")
-//         );
-//         assert_eq!(
-//             generated_actions[2],
-//             PathBuf::from("/file_client_send_3.txt")
-//         );
-//         assert_eq!(
-//             generated_actions[3],
-//             PathBuf::from("/file_client_send_4.txt")
-//         );
-//     }
-
-//     #[test]
-//     fn test_calculate_change_score() {
-//         let config = sync::Config::default();
-
-//         assert_eq!(
-//             calculate_change_score(EventKind::Modify(notify::event::ModifyKind::Any), &config),
-//             config.modify_weight
-//         );
-//         assert_eq!(
-//             calculate_change_score(EventKind::Remove(notify::event::RemoveKind::Any), &config),
-//             config.remove_weight
-//         );
-//         assert_eq!(
-//             calculate_change_score(EventKind::Create(notify::event::CreateKind::Any), &config),
-//             config.create_weight
-//         );
-//         assert_eq!(
-//             calculate_change_score(EventKind::Access(notify::event::AccessKind::Any), &config),
-//             0
-//         );
-//     }
-
-//     #[test]
-//     fn test_should_trigger_sync() {
-//         let config = sync::Config::default();
-
-//         assert!(!should_trigger_sync(config.sync_threshold, &config));
-//         assert!(should_trigger_sync(config.sync_threshold + 1, &config));
-//         assert!(!should_trigger_sync(config.sync_threshold - 1, &config));
-//         assert!(!should_trigger_sync(0, &config));
-//     }
-// }
+        assert!(!should_trigger_sync(config.sync_threshold, &config));
+        assert!(should_trigger_sync(config.sync_threshold + 1, &config));
+        assert!(!should_trigger_sync(config.sync_threshold - 1, &config));
+        assert!(!should_trigger_sync(0, &config));
+    }
+}
