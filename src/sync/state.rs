@@ -276,11 +276,13 @@ pub fn generate_sync_plan(
             (Some(local_file), Some(remote_file)) if remote_file.hash != local_file.hash => {
                 let remote_file_timestamp = remote_file.timestamp.unwrap_or_default();
                 if proto_timestamp_gt(local_file.modified_ts, remote_file_timestamp) {
+                    // Server (local) file is newer → Download (server sends to client)
                     latest_timestamp = local_file.modified_ts;
-                    TransferDirection::Upload
-                } else if proto_timestamp_gt(remote_file_timestamp, local_file.modified_ts) {
-                    latest_timestamp = remote_file_timestamp;
                     TransferDirection::Download
+                } else if proto_timestamp_gt(remote_file_timestamp, local_file.modified_ts) {
+                    // Client (remote) file is newer → Upload (client sends to server)
+                    latest_timestamp = remote_file_timestamp;
+                    TransferDirection::Upload
                 } else {
                     warn!(
                         ?path,
@@ -291,16 +293,16 @@ pub fn generate_sync_plan(
                 }
             }
             (Some(local_file), None) => {
-                debug!(?path, "File present on client but not on server");
+                debug!(?path, "File present on server (local) but not on client (remote)");
                 // TODO implement deleted file logic
                 latest_timestamp = local_file.modified_ts;
-                TransferDirection::Upload
+                TransferDirection::Download
             }
             (None, Some(remote_file)) => {
-                debug!(?path, "File present on server but not on client");
+                debug!(?path, "File present on client (remote) but not on server (local)");
                 // TODO implement deleted file logic
                 latest_timestamp = remote_file.timestamp.unwrap_or_default();
-                TransferDirection::Download
+                TransferDirection::Upload
             }
             (None, None) => unreachable!(),
             _ => TransferDirection::Skip,
@@ -549,7 +551,9 @@ mod tests {
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
-        assert_eq!(plan[0].direction, TransferDirection::Upload as i32);
+        // Server (local) timestamp 2000 > Client (remote) timestamp 1000
+        // Server is newer → Download (server sends to client)
+        assert_eq!(plan[0].direction, TransferDirection::Download as i32);
     }
 
     #[test]
@@ -579,7 +583,9 @@ mod tests {
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].path, "file.txt");
-        assert_eq!(plan[0].direction, TransferDirection::Download as i32);
+        // Client (remote) timestamp 2000 > Server (local) timestamp 1000
+        // Client is newer → Upload (client sends to server)
+        assert_eq!(plan[0].direction, TransferDirection::Upload as i32);
     }
 
     #[test]

@@ -51,6 +51,9 @@ fn test_sync_plan_direction() {
 
 #[test]
 fn test_generate_sync_plan_local_newer() {
+    // Server (local) timestamp: 2000
+    // Client (remote) timestamp: 1000
+    // Server is newer → Download (server sends to client)
     let mut local_tree = BTreeMap::new();
     local_tree.insert(
         PathBuf::from("file.txt"),
@@ -82,11 +85,14 @@ fn test_generate_sync_plan_local_newer() {
 
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].path, "file.txt");
-    assert_eq!(plan[0].direction, TransferDirection::Upload as i32);
+    assert_eq!(plan[0].direction, TransferDirection::Download as i32);
 }
 
 #[test]
 fn test_generate_sync_plan_remote_newer() {
+    // Server (local) timestamp: 1000
+    // Client (remote) timestamp: 2000
+    // Client is newer → Upload (client sends to server)
     let mut local_tree = BTreeMap::new();
     local_tree.insert(
         PathBuf::from("file.txt"),
@@ -118,5 +124,5 @@ fn test_generate_sync_plan_remote_newer() {
 
     assert_eq!(plan.len(), 1);
     assert_eq!(plan[0].path, "file.txt");
-    assert_eq!(plan[0].direction, TransferDirection::Download as i32);
+    assert_eq!(plan[0].direction, TransferDirection::Upload as i32);
 }
