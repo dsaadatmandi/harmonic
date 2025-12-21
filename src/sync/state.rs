@@ -294,13 +294,13 @@ pub fn generate_sync_plan(
                 debug!(?path, "File present on client but not on server");
                 // TODO implement deleted file logic
                 latest_timestamp = local_file.modified_ts;
-                TransferDirection::Download
+                TransferDirection::Upload
             }
             (None, Some(remote_file)) => {
                 debug!(?path, "File present on server but not on client");
                 // TODO implement deleted file logic
                 latest_timestamp = remote_file.timestamp.unwrap_or_default();
-                TransferDirection::Upload
+                TransferDirection::Download
             }
             (None, None) => unreachable!(),
             _ => TransferDirection::Skip,
