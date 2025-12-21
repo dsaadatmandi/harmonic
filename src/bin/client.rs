@@ -278,7 +278,7 @@ where
         Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     <T as tonic::client::GrpcService<tonic::body::Body>>::Future: Send,
 {
-    let (tx, rx) = tokio::sync::mpsc::channel::<SyncRequest>(10);
+    let (tx, rx) = tokio::sync::mpsc::channel::<SyncRequest>(256);
     let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     let mut request = tonic::Request::new(out_stream);
     request.metadata_mut().insert(
