@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::{fs, io};
@@ -44,6 +45,12 @@ impl Default for Config {
 impl Config {
     pub fn server_uri(&self) -> String {
         format!("https://{}", self.socket_addr)
+    }
+
+    pub fn socket_addr(&self) -> Result<SocketAddr> {
+        self.socket_addr
+            .parse()
+            .map_err(|_| HarmonicError::ConfigError)
     }
 }
 
@@ -113,6 +120,7 @@ fn handle_no_config() -> Result<Config> {
         "Please enter the address your server should listen on / your client should connect to:"
     );
     println!("Valid formats include: IP:PORT and [::1]:PORT");
+    println!("The generated certificate will be valid for this address and the server's local IP");
     io::stdin()
         .read_line(&mut address)
         .expect("Failed to read input for address");
