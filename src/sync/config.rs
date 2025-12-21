@@ -15,6 +15,7 @@ pub struct Config {
     pub socket_addr: String,
     pub schedule_delay: u64,
     pub log_level: String,
+    pub force_bootstrap: bool,
 
     pub sync_threshold: u64,
     pub modify_weight: u64,
@@ -33,6 +34,7 @@ impl Default for Config {
             socket_addr: String::from("[::1]:42069"), // server overwrites this with localhost, uses same port
             schedule_delay: 3600,
             log_level: String::from("info"),
+            force_bootstrap: false,
             sync_threshold: 20,
             modify_weight: 2,
             remove_weight: 5,
@@ -52,10 +54,15 @@ impl Config {
             .parse()
             .map_err(|_| HarmonicError::ConfigError)
     }
+
+    /// Builder method to override force_bootstrap from CLI args
+    pub fn with_force_bootstrap(mut self, force: bool) -> Self {
+        self.force_bootstrap = force;
+        self
+    }
 }
 
 pub fn config_dir_path() -> Result<PathBuf> {
-    // let mut path = dirs::config_dir().ok_or(HarmonicError::ConfigError)?;
     let mut path = PathBuf::from(".");
     path.push(".harmonic");
 
@@ -158,6 +165,7 @@ mod tests {
             sync_path: PathBuf::from("/tmp/test"),
             socket_addr: String::from("192.168.1.100:42069"),
             log_level: String::from("debug"),
+            force_bootstrap: false,
             schedule_delay: 3600,
             sync_threshold: 20,
             modify_weight: 2,
@@ -181,6 +189,7 @@ mod tests {
             socket_addr: String::from("[::1]:42069"),
             schedule_delay: 3600,
             log_level: String::from("debug"),
+            force_bootstrap: false,
             sync_threshold: 20,
             modify_weight: 2,
             remove_weight: 5,
@@ -203,6 +212,7 @@ mod tests {
             socket_addr: String::from("[::]:42069"),
             schedule_delay: 3600,
             log_level: String::from("debug"),
+            force_bootstrap: false,
             sync_threshold: 20,
             modify_weight: 2,
             remove_weight: 5,
@@ -224,6 +234,7 @@ mod tests {
             sync_path: PathBuf::from("/tmp/test"),
             socket_addr: String::from("0.0.0.0:42069"),
             log_level: String::from("debug"),
+            force_bootstrap: false,
             schedule_delay: 3600,
             sync_threshold: 20,
             modify_weight: 2,

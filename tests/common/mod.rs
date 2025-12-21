@@ -6,8 +6,9 @@ pub fn create_test_config(path: &PathBuf) -> Config {
     Config {
         sync_path: path.clone(),
         socket_addr: String::from("[::1]:42069"),
-        schedule_delay: 10,
+        schedule_delay: 100,
         log_level: String::from("debug"),
+        force_bootstrap: false,
         sync_threshold: 20,
         modify_weight: 2,
         remove_weight: 5,
