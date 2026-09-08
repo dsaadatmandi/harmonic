@@ -1,18 +1,32 @@
 use futures::{Sink, SinkExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::Sender;
 use anyhow::Result;
 use tracing::{debug, info, instrument};
 
 use crate::proto::{Delta, SyncRequest, TransferDirection, sync_request};
 use crate::sync::Config;
-use crate::sync::transfer::{send_block_signatures_for_file, send_delta_from_block_signatures};
+use crate::sync::state::from_protocol_path;
+use crate::sync::transfer::{get_absolute_path, send_block_signatures_for_file, send_delta_from_block_signatures};
 use crate::utils::writer::delta_writer;
 use crate::utils::HarmonicError;
 
 pub enum SyncStatus {
     Continue,
     Completed,
+}
+
+/// Deletes a file inside the sync root. Paths are resolved and validated via
+/// get_absolute_path so deletions can never escape the sync directory
+pub async fn delete_sync_file(file_path: &Path, config: &Config) -> Result<()> {
+    let abs_path = get_absolute_path(file_path, &config.sync_path)?;
+
+    if abs_path.exists() {
+        info!("Deleting file {:?}", abs_path);
+        tokio::fs::remove_file(&abs_path).await?;
+    }
+
+    Ok(())
 }
 
 #[instrument(skip(payload, tx, file_path, config, writer_tx), fields(payload_type = ?std::mem::discriminant(&payload)))]
@@ -30,13 +44,17 @@ where
         sync_request::Payload::FileAction(file_action) => {
             match file_action.direction {
                 d if d == TransferDirection::Download as i32 => {
-                    *file_path = PathBuf::from(file_action.path);
+                    *file_path = from_protocol_path(&file_action.path);
                 }
                 d if d == TransferDirection::Upload as i32 => {
-                    *file_path = PathBuf::from(file_action.path);
+                    *file_path = from_protocol_path(&file_action.path);
                     let cache = send_block_signatures_for_file(file_path, &mut tx, &config).await?;
-                    let abs_path = crate::sync::transfer::get_absolute_path(file_path, &config.sync_path)?;
+                    let abs_path = get_absolute_path(file_path, &config.sync_path)?;
                     *writer_tx = Some(delta_writer(&abs_path, cache, file_action.timestamp_latest_modified.unwrap_or_default()).await)
+                }
+                d if d == TransferDirection::Delete as i32 => {
+                    *file_path = from_protocol_path(&file_action.path);
+                    delete_sync_file(file_path, &config).await?;
                 }
                 _ => {}
             }
@@ -129,5 +147,147 @@ mod tests {
         let received = writer_rx.recv().await;
         assert!(received.is_some());
         assert_eq!(received.unwrap().index, 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_sync_payload_delete_removes_file() {
+        // Scenario: server receives a Delete FileAction for a file it holds
+        // Expected: the file is removed from the sync root
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = PathBuf::from(dir.path());
+        let config = Config {
+            sync_path: root_path.clone(),
+            ..Config::default()
+        };
+
+        let file_path = root_path.join("deleted.txt");
+        std::fs::write(&file_path, "to be deleted").unwrap();
+        assert!(file_path.exists());
+
+        let (tx, _rx) = mpsc::channel(1);
+        let mut sink = tx.sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+
+        let mut file_path_state = PathBuf::new();
+        let mut writer_tx = None;
+
+        let payload = sync_request::Payload::FileAction(FileAction {
+            path: "deleted.txt".to_string(),
+            direction: TransferDirection::Delete as i32,
+            timestamp_latest_modified: Default::default(),
+        });
+
+        let result = handle_sync_payload(
+            payload,
+            &mut sink,
+            &mut file_path_state,
+            config,
+            &mut writer_tx,
+        ).await;
+
+        assert!(result.is_ok());
+        assert!(!file_path.exists(), "file should be deleted from the sync root");
+    }
+
+    #[tokio::test]
+    async fn test_handle_sync_payload_delete_missing_file_is_noop() {
+        // Scenario: Delete arrives for a file that is already gone
+        // Expected: no error, deletion is idempotent
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = PathBuf::from(dir.path());
+        let config = Config {
+            sync_path: root_path,
+            ..Config::default()
+        };
+
+        let (tx, _rx) = mpsc::channel(1);
+        let mut sink = tx.sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+
+        let mut file_path = PathBuf::new();
+        let mut writer_tx = None;
+
+        let payload = sync_request::Payload::FileAction(FileAction {
+            path: "does_not_exist.txt".to_string(),
+            direction: TransferDirection::Delete as i32,
+            timestamp_latest_modified: Default::default(),
+        });
+
+        let result = handle_sync_payload(
+            payload,
+            &mut sink,
+            &mut file_path,
+            config,
+            &mut writer_tx,
+        ).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_sync_payload_delete_rejects_traversal() {
+        // Scenario: Delete arrives with a path escaping the sync root
+        // Expected: rejected by the path integrity check
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = PathBuf::from(dir.path());
+        let config = Config {
+            sync_path: root_path,
+            ..Config::default()
+        };
+
+        let (tx, _rx) = mpsc::channel(1);
+        let mut sink = tx.sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+
+        let mut file_path = PathBuf::new();
+        let mut writer_tx = None;
+
+        let payload = sync_request::Payload::FileAction(FileAction {
+            path: "../../outside.txt".to_string(),
+            direction: TransferDirection::Delete as i32,
+            timestamp_latest_modified: Default::default(),
+        });
+
+        let result = handle_sync_payload(
+            payload,
+            &mut sink,
+            &mut file_path,
+            config,
+            &mut writer_tx,
+        ).await;
+
+        assert!(result.is_err(), "path traversal must be rejected for deletions");
+    }
+
+    #[tokio::test]
+    async fn test_handle_sync_payload_normalizes_windows_action_path() {
+        // Scenario: FileAction arrives with a Windows style separator
+        // Expected: file_path is stored as a nested platform path
+        let dir = tempfile::tempdir().unwrap();
+        let root_path = PathBuf::from(dir.path());
+        let config = Config {
+            sync_path: root_path,
+            ..Config::default()
+        };
+
+        let (tx, _rx) = mpsc::channel(1);
+        let mut sink = tx.sink_map_err(|e| HarmonicError::SendError(e.to_string()));
+
+        let mut file_path = PathBuf::new();
+        let mut writer_tx = None;
+
+        let payload = sync_request::Payload::FileAction(FileAction {
+            path: "dir\\file.txt".to_string(),
+            direction: TransferDirection::Download as i32,
+            timestamp_latest_modified: Default::default(),
+        });
+
+        let result = handle_sync_payload(
+            payload,
+            &mut sink,
+            &mut file_path,
+            config,
+            &mut writer_tx,
+        ).await;
+
+        assert!(result.is_ok());
+        assert_eq!(file_path.components().count(), 2, "dir\\file.txt should be a nested path");
     }
 }

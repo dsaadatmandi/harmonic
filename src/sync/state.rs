@@ -10,7 +10,8 @@ use walkdir::WalkDir;
 
 use crate::Config;
 use crate::proto::{
-    BlockSignature, BlockSignatures, FileAction, FileStatus, FileType, TransferDirection,
+    BlockSignature, BlockSignatures, ChangeType as ProtoChangeType, FileAction, FileStatus,
+    FileType, TransferDirection,
 };
 use crate::sync::transfer::get_absolute_path;
 use crate::utils::{BuzHash, HarmonicError, Result};
@@ -68,19 +69,32 @@ pub struct BlockCache {
     pub blocks: Vec<Box<[u8]>>,
 }
 
+/// Paths are normalized to forward slashes at the protocol boundary so a
+/// Windows client and a Unix server agree on the same relative path encoding
+pub fn to_protocol_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+pub fn from_protocol_path(path: &str) -> PathBuf {
+    PathBuf::from(path.replace('\\', "/"))
+}
+
 impl TryFrom<Diff> for FileStatus {
     type Error = HarmonicError;
 
     fn try_from(diff: Diff) -> Result<Self> {
+        let change_type = match diff.change {
+            ChangeType::Added => ProtoChangeType::Added,
+            ChangeType::Removed => ProtoChangeType::Removed,
+            ChangeType::Modified => ProtoChangeType::Modified,
+        };
+
         Ok(FileStatus {
-            path: diff
-                .path
-                .to_str()
-                .ok_or(HarmonicError::StringInvalid)?
-                .to_string(),
+            path: to_protocol_path(&diff.path),
             timestamp: Some(diff.modified_ts),
             file_type: FileType::Other.into(),
             hash: diff.hash.to_vec(),
+            change_type: change_type as i32,
         })
     }
 }
@@ -115,6 +129,13 @@ fn state_file_path() -> Result<PathBuf> {
     Ok(path)
 }
 
+fn state_dir_path() -> Result<PathBuf> {
+    let mut path = PathBuf::from(".");
+    path.push(".harmonic");
+
+    Ok(path)
+}
+
 fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf> {
     absolute_path
         .strip_prefix(sync_path)
@@ -128,9 +149,25 @@ fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf> 
 pub fn save_state(state: SyncState) -> Result<()> {
     let state_json = serde_json::to_string(&state)?;
 
+    fs::DirBuilder::new()
+        .recursive(true)
+        .create(state_dir_path()?)?;
+
     fs::write(state_file_path()?, state_json)?;
 
     Ok(())
+}
+
+/// Persists the sync state only when the sync itself succeeded, so a failed
+/// transfer never records files as synced that were not actually transferred
+pub fn save_state_on_success(
+    sync_result: &anyhow::Result<()>,
+    state: SyncState,
+) -> anyhow::Result<()> {
+    match sync_result {
+        Ok(()) => Ok(save_state(state)?),
+        Err(e) => Err(anyhow::anyhow!("Sync failed, state not saved: {:#}", e)),
+    }
 }
 
 pub fn load_state() -> Result<SyncState> {
@@ -239,10 +276,59 @@ pub fn file_status_vec_to_tree(file_status_vec: Vec<FileStatus>) -> BTreeMap<Pat
     let mut tree = BTreeMap::new();
 
     for f in file_status_vec {
-        tree.insert(PathBuf::from(f.path), f.hash);
+        tree.insert(from_protocol_path(&f.path), f.hash);
     }
 
     tree
+}
+
+/// Builds the full client status list sent to the server. Unchanged files are
+/// included with an UNCHANGED change type so the server can detect deletions
+/// on either side: REMOVED entries carry their previous metadata, everything
+/// else reflects the current tree
+pub fn build_status_list(
+    before_state: &SyncState,
+    now_state: &SyncState,
+) -> Result<Vec<FileStatus>> {
+    let diffs = compare_states(before_state, now_state);
+    let diff_by_path: BTreeMap<&Path, &Diff> =
+        diffs.iter().map(|d| (d.path.as_path(), d)).collect();
+
+    let mut status_list: Vec<FileStatus> = Vec::with_capacity(now_state.tree.len() + diffs.len());
+
+    for (path, metadata) in &now_state.tree {
+        let change_type = match diff_by_path.get(path.as_path()) {
+            Some(diff) => match diff.change {
+                ChangeType::Added => ProtoChangeType::Added,
+                ChangeType::Modified => ProtoChangeType::Modified,
+                ChangeType::Removed => ProtoChangeType::Unchanged,
+            },
+            None => ProtoChangeType::Unchanged,
+        };
+
+        status_list.push(FileStatus {
+            path: to_protocol_path(path),
+            timestamp: Some(metadata.modified_ts),
+            file_type: FileType::Other.into(),
+            hash: metadata.hash.to_vec(),
+            change_type: change_type as i32,
+        });
+    }
+
+    // removed files no longer exist in the current tree so they are appended from the diffs
+    for diff in &diffs {
+        if matches!(diff.change, ChangeType::Removed) {
+            status_list.push(FileStatus {
+                path: to_protocol_path(&diff.path),
+                timestamp: Some(diff.modified_ts),
+                file_type: FileType::Other.into(),
+                hash: diff.hash.to_vec(),
+                change_type: ProtoChangeType::Removed as i32,
+            });
+        }
+    }
+
+    Ok(status_list)
 }
 
 #[instrument(skip(state_now, remote_files), fields(local_count = state_now.tree.len(), remote_count = remote_files.len()))]
@@ -255,7 +341,7 @@ pub fn generate_sync_plan(
 
     let remote_tree: BTreeMap<PathBuf, &FileStatus> = remote_files
         .iter()
-        .map(|r| (PathBuf::from(&r.path), r))
+        .map(|r| (from_protocol_path(&r.path), r))
         .collect();
 
     let all_paths: BTreeSet<&PathBuf> = state_now.tree.keys().chain(remote_tree.keys()).collect();
@@ -272,7 +358,14 @@ pub fn generate_sync_plan(
         let remote = remote_tree.get(path);
         let mut latest_timestamp: prost_types::Timestamp = Default::default();
 
+        let remote_change = remote
+            .map(|r| ProtoChangeType::try_from(r.change_type).unwrap_or(ProtoChangeType::Added));
+
         let direction: TransferDirection = match (local, remote) {
+            (Some(_), Some(_)) if remote_change == Some(ProtoChangeType::Removed) => {
+                debug!(?path, "File deleted on client (remote), propagating deletion to server (local)");
+                TransferDirection::Delete
+            }
             (Some(local_file), Some(remote_file)) if remote_file.hash != local_file.hash => {
                 let remote_file_timestamp = remote_file.timestamp.unwrap_or_default();
                 if proto_timestamp_gt(local_file.modified_ts, remote_file_timestamp) {
@@ -294,25 +387,29 @@ pub fn generate_sync_plan(
             }
             (Some(local_file), None) => {
                 debug!(?path, "File present on server (local) but not on client (remote)");
-                // TODO implement deleted file logic
+                // file was never on the client, send it down
                 latest_timestamp = local_file.modified_ts;
                 TransferDirection::Download
             }
-            (None, Some(remote_file)) => {
+            (None, Some(remote_file)) if remote_change == Some(ProtoChangeType::Added)
+                || remote_change == Some(ProtoChangeType::Modified) =>
+            {
                 debug!(?path, "File present on client (remote) but not on server (local)");
-                // TODO implement deleted file logic
                 latest_timestamp = remote_file.timestamp.unwrap_or_default();
                 TransferDirection::Upload
+            }
+            (None, Some(_)) => {
+                debug!(?path, "File unchanged on client (remote) but missing on server (local)");
+                // client had the file at last sync and did not change it, it was deleted here
+                TransferDirection::Delete
             }
             (None, None) => unreachable!(),
             _ => TransferDirection::Skip,
         };
 
-        let path_str = path.to_str().ok_or(HarmonicError::StringInvalid)?;
-
-        debug!(?path_str, ?direction, "Pushing file into sync plan");
+        debug!(?direction, "Pushing file into sync plan");
         sync_plan.push(FileAction {
-            path: path_str.to_string(),
+            path: to_protocol_path(path),
             direction: direction.into(),
             timestamp_latest_modified: Some(latest_timestamp),
         });
@@ -363,6 +460,34 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn test_to_protocol_path_converts_backslashes() {
+        assert_eq!(to_protocol_path(Path::new("dir/file.txt")), "dir/file.txt");
+        assert_eq!(to_protocol_path(Path::new("dir\\file.txt")), "dir/file.txt");
+        assert_eq!(
+            to_protocol_path(Path::new("dir\\sub\\file.txt")),
+            "dir/sub/file.txt"
+        );
+    }
+
+    #[test]
+    fn test_from_protocol_path_handles_both_separators() {
+        let forward = from_protocol_path("dir/file.txt");
+        let backward = from_protocol_path("dir\\file.txt");
+
+        assert_eq!(forward.components().count(), 2);
+        assert_eq!(backward.components().count(), 2);
+        assert_eq!(forward, backward);
+    }
+
+    #[test]
+    fn test_protocol_path_round_trip() {
+        let original = PathBuf::from("dir\\sub\\file.txt");
+        let round_tripped = from_protocol_path(&to_protocol_path(&original));
+
+        assert_eq!(round_tripped.components().count(), 3);
+    }
+
+    #[test]
     fn test_file_status_vec_to_tree() {
         let file_statuses = vec![
             FileStatus {
@@ -373,6 +498,7 @@ mod tests {
                     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
                     23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
                 ],
+                change_type: ProtoChangeType::Added as i32,
             },
             FileStatus {
                 path: String::from("test2.txt"),
@@ -382,6 +508,7 @@ mod tests {
                     33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52,
                     53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
                 ],
+                change_type: ProtoChangeType::Added as i32,
             },
         ];
 
@@ -402,6 +529,22 @@ mod tests {
                 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64
             ])
         );
+    }
+
+    #[test]
+    fn test_file_status_vec_to_tree_normalizes_separators() {
+        let file_statuses = vec![FileStatus {
+            path: String::from("dir/file.txt"),
+            timestamp: Some(Timestamp::default()),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: ProtoChangeType::Added as i32,
+        }];
+
+        let tree = file_status_vec_to_tree(file_statuses);
+
+        let key = tree.keys().next().unwrap();
+        assert_eq!(key.components().count(), 2, "dir/file.txt should be a nested path");
     }
 
     #[test]
@@ -545,6 +688,7 @@ mod tests {
             timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
             file_type: FileType::Other.into(),
             hash: vec![2; 32],
+            change_type: ProtoChangeType::Modified as i32,
         }];
 
         let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
@@ -577,6 +721,7 @@ mod tests {
             timestamp: Some(Timestamp { seconds: 2000, nanos: 0 }),
             file_type: FileType::Other.into(),
             hash: vec![2; 32],
+            change_type: ProtoChangeType::Modified as i32,
         }];
 
         let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
@@ -609,12 +754,194 @@ mod tests {
             timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
             file_type: FileType::Other.into(),
             hash: vec![1; 32],
+            change_type: ProtoChangeType::Unchanged as i32,
         }];
 
         let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
 
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].direction, TransferDirection::Skip as i32);
+    }
+
+    #[test]
+    fn test_generate_sync_plan_client_removed_deletes_on_server() {
+        // Scenario: client deleted the file, server still has it
+        // Expected: Delete so the server removes its copy instead of re-downloading
+        let mut local_tree = BTreeMap::new();
+        local_tree.insert(
+            PathBuf::from("deleted.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
+            },
+        );
+
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: local_tree,
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("deleted.txt"),
+            timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: ProtoChangeType::Removed as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].direction,
+            TransferDirection::Delete as i32,
+            "Client deletion must propagate as Delete, not Download"
+        );
+    }
+
+    #[test]
+    fn test_generate_sync_plan_server_deleted_propagates_to_client() {
+        // Scenario: server deleted the file, client still has it unchanged
+        // Expected: Delete so the client removes its copy instead of re-uploading
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: BTreeMap::new(),
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("deleted.txt"),
+            timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: ProtoChangeType::Unchanged as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].direction,
+            TransferDirection::Delete as i32,
+            "Server deletion must propagate as Delete, not Upload"
+        );
+    }
+
+    #[test]
+    fn test_generate_sync_plan_both_deleted_is_noop_delete() {
+        // Scenario: file was deleted on both sides
+        // Expected: Delete which is a no-op on both sides
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: BTreeMap::new(),
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("deleted.txt"),
+            timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: ProtoChangeType::Removed as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].direction, TransferDirection::Delete as i32);
+    }
+
+    #[test]
+    fn test_generate_sync_plan_remote_added_uploads_when_missing_locally() {
+        // Scenario: client added a new file, server does not have it
+        // Expected: Upload
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: BTreeMap::new(),
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("new.txt"),
+            timestamp: Some(Timestamp { seconds: 2000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: ProtoChangeType::Added as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].direction, TransferDirection::Upload as i32);
+    }
+
+    #[test]
+    fn test_generate_sync_plan_remote_modified_uploads_when_missing_locally() {
+        // Scenario: client modified a file that the server never had
+        // Expected: Upload
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: BTreeMap::new(),
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("modified.txt"),
+            timestamp: Some(Timestamp { seconds: 2000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: ProtoChangeType::Modified as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].direction, TransferDirection::Upload as i32);
+    }
+
+    #[test]
+    fn test_generate_sync_plan_absent_remote_entry_downloads() {
+        // Scenario: server has a file that is not in the client status list at all
+        // e.g. a brand new client. Expected: Download
+        let mut local_tree = BTreeMap::new();
+        local_tree.insert(
+            PathBuf::from("server_file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
+            },
+        );
+
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: local_tree,
+        };
+
+        let plan = generate_sync_plan(&state_now, &vec![]).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].direction, TransferDirection::Download as i32);
+    }
+
+    #[test]
+    fn test_generate_sync_plan_normalizes_plan_paths() {
+        // Scenario: tree key contains a Windows style separator (simulating a
+        // Windows client). Expected: plan path uses forward slashes
+        let mut local_tree = BTreeMap::new();
+        local_tree.insert(
+            PathBuf::from("dir\\file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
+            },
+        );
+
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: local_tree,
+        };
+
+        let plan = generate_sync_plan(&state_now, &vec![]).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].path, "dir/file.txt");
+        assert!(!plan[0].path.contains('\\'));
     }
 
     #[test]
@@ -626,8 +953,8 @@ mod tests {
     #[test]
     fn test_diff_to_file_status_conversion() {
         let diff = Diff {
-            path: PathBuf::from("test_file.txt"),
-            change: ChangeType::Modified,
+            path: PathBuf::from("nested\\test_file.txt"),
+            change: ChangeType::Removed,
             hash: [
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
                 24, 25, 26, 27, 28, 29, 30, 31, 32,
@@ -637,7 +964,8 @@ mod tests {
 
         let file_status: FileStatus = FileStatus::try_from(diff).unwrap();
 
-        assert_eq!(file_status.path, "test_file.txt");
+        assert_eq!(file_status.path, "nested/test_file.txt");
+        assert_eq!(file_status.change_type, ProtoChangeType::Removed as i32);
         assert_eq!(file_status.timestamp, Some(Timestamp { seconds: 123456789, nanos: 0 }));
         assert_eq!(
             file_status.hash,
@@ -646,6 +974,121 @@ mod tests {
                 24, 25, 26, 27, 28, 29, 30, 31, 32
             ]
         );
+    }
+
+    #[test]
+    fn test_build_status_list_classifies_all_changes() {
+        // Scenario: one file kept, one modified, one removed, one added since
+        // last sync. Expected: full status list where every file carries the
+        // correct change type, including the removed file
+        let dir = tempdir().unwrap();
+        let root = PathBuf::from(dir.path());
+
+        let keep = root.join("keep.txt");
+        let modify = root.join("modify.txt");
+        let remove = root.join("remove.txt");
+
+        fs::write(&keep, "unchanged").unwrap();
+        fs::write(&modify, "original").unwrap();
+        fs::write(&remove, "will be removed").unwrap();
+
+        let before_state = generate_state(&root, false).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&modify, "modified content").unwrap();
+        fs::remove_file(&remove).unwrap();
+        fs::write(root.join("new.txt"), "brand new").unwrap();
+
+        let now_state = generate_state(&root, false).unwrap();
+
+        let status_list = build_status_list(&before_state, &now_state).unwrap();
+
+        assert_eq!(status_list.len(), 4, "3 current files plus 1 removed entry");
+
+        let by_path: BTreeMap<&str, ProtoChangeType> = status_list
+            .iter()
+            .map(|s| (s.path.as_str(), ProtoChangeType::try_from(s.change_type).unwrap()))
+            .collect();
+
+        assert_eq!(by_path.get("keep.txt"), Some(&ProtoChangeType::Unchanged));
+        assert_eq!(by_path.get("modify.txt"), Some(&ProtoChangeType::Modified));
+        assert_eq!(by_path.get("new.txt"), Some(&ProtoChangeType::Added));
+        assert_eq!(by_path.get("remove.txt"), Some(&ProtoChangeType::Removed));
+    }
+
+    #[test]
+    fn test_build_status_list_paths_use_protocol_separators() {
+        // Simulate a tree key with Windows style separators
+        let mut tree = BTreeMap::new();
+        tree.insert(
+            PathBuf::from("dir\\file.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: Timestamp::default(),
+            },
+        );
+
+        let state = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree,
+        };
+
+        let status_list = build_status_list(&state, &state).unwrap();
+
+        assert_eq!(status_list.len(), 1);
+        assert_eq!(status_list[0].path, "dir/file.txt");
+        assert_eq!(
+            status_list[0].change_type,
+            ProtoChangeType::Unchanged as i32
+        );
+    }
+
+    #[test]
+    fn test_save_state_on_success_and_failure() {
+        // Scenario: state must only be persisted when the sync succeeded.
+        // Expected: failed sync leaves the previous state untouched, successful
+        // sync writes the new state. This test switches the working directory
+        // into a tempdir because state paths are process relative
+        let dir = tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let state_v1 = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: BTreeMap::new(),
+        };
+
+        let mut tree_v2 = BTreeMap::new();
+        tree_v2.insert(
+            PathBuf::from("file.txt"),
+            FileMetadata {
+                hash: [2; 32],
+                modified_ts: Timestamp { seconds: 2000, nanos: 0 },
+            },
+        );
+        let state_v2 = SyncState {
+            last_sync_timestamp_micros: 2000,
+            tree: tree_v2,
+        };
+
+        // seed a previous successful sync
+        save_state(state_v1).unwrap();
+
+        // failed sync must not overwrite the stored state
+        let failure = save_state_on_success(&Err(anyhow::anyhow!("transfer failed")), state_v2.clone());
+        assert!(failure.is_err());
+
+        let persisted = load_state().unwrap();
+        assert_eq!(persisted.tree.len(), 0, "failed sync must not save state");
+
+        // successful sync must overwrite the stored state
+        save_state_on_success(&Ok(()), state_v2).unwrap();
+
+        let persisted = load_state().unwrap();
+        assert_eq!(persisted.tree.len(), 1, "successful sync must save state");
+        assert!(persisted.tree.contains_key(&PathBuf::from("file.txt")));
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     #[test]

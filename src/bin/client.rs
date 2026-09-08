@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use harmonic::proto::{FileAction, FileStatus};
-use harmonic::sync::handler::{SyncStatus, handle_sync_payload};
+use harmonic::proto::{ChangeType, FileAction, FileStatus};
+use harmonic::sync::handler::{SyncStatus, delete_sync_file, handle_sync_payload};
 use harmonic::utils::HarmonicError;
 use harmonic::utils::tracing::{send_trace, tracing_orchestrator};
 use harmonic::utils::writer::delta_writer;
@@ -32,7 +32,7 @@ use harmonic::proto::{
     ClientSyncState, ServerSyncStateResponse, TransferDirection, harmonic_client::HarmonicClient,
 };
 
-use harmonic::sync::{self, Config};
+use harmonic::sync::{self, Config, from_protocol_path};
 
 use harmonic::proto::SyncRequest;
 
@@ -154,10 +154,15 @@ async fn run_sync() -> Result<()> {
     let last_state = sync::load_state().context("Unable to load previous state")?;
     let now_state =
         sync::generate_state(&CONFIG.sync_path, true).context("Failed to generate state")?;
-    let diffs = sync::compare_states(&last_state, &now_state);
+    let status_list = sync::build_status_list(&last_state, &now_state)
+        .context("Failed to build client status list")?;
 
     // wont check with server which is not ideal
-    if diffs.is_empty() {
+    let change_count = status_list
+        .iter()
+        .filter(|s| s.change_type != ChangeType::Unchanged as i32)
+        .count();
+    if change_count == 0 {
         info!("No updates to push");
         // return Ok(());
     }
@@ -165,7 +170,7 @@ async fn run_sync() -> Result<()> {
     let response = send_state_to_server(
         &sync_uuid,
         last_state.last_sync_timestamp_micros,
-        diffs,
+        status_list,
         client.clone(),
     )
     .await
@@ -180,21 +185,22 @@ async fn run_sync() -> Result<()> {
         CONFIG.sync_path.clone(),
     )
     .await;
-    match result {
-        Ok(()) => info!("Completed Sync"),
-        Err(e) => error!("Sync failed due to: {:?}", e),
+    if let Err(e) = &result {
+        error!("Sync failed due to: {:?}", e);
     }
 
-    sync::save_state(now_state).context("Failed to save state")?;
+    // only persist the new state when the transfer succeeded, otherwise files
+    // would be recorded as synced although they were not transferred
+    sync::save_state_on_success(&result, now_state).context("Failed to save state")?;
 
     Ok(())
 }
 
-#[instrument(skip(diffs, client), fields(sync_uuid = %sync_uuid, diff_count = diffs.len()))]
+#[instrument(skip(status_list, client), fields(sync_uuid = %sync_uuid, status_count = status_list.len()))]
 async fn send_state_to_server<T: Debug>(
     sync_uuid: &Uuid,
     last_sync_timestamp: i64,
-    diffs: Vec<sync::Diff>,
+    status_list: Vec<FileStatus>,
     mut client: HarmonicClient<T>,
 ) -> Result<ServerSyncStateResponse>
 where
@@ -207,11 +213,7 @@ where
     let request = tonic::Request::new(ClientSyncState {
         sync_uuid: sync_uuid.to_string(),
         timestamp_last_sync_micro: last_sync_timestamp,
-        status_list: diffs
-            .into_iter()
-            .map(|d| FileStatus::try_from(d))
-            .collect::<Result<Vec<_>, _>>()
-            .context("Unable to convert Diff into FileStatus")?,
+        status_list,
     });
 
     let response = client
@@ -220,6 +222,12 @@ where
         .into_inner();
 
     Ok(response)
+}
+
+/// Skipped files need no transfer, running them through the stream would
+/// stall both sides waiting for messages that never come
+fn is_actionable(action: &FileAction) -> bool {
+    action.direction != TransferDirection::Skip as i32
 }
 
 #[instrument(skip(client, file_actions, sync_path), fields(sync_uuid = %sync_uuid, action_count = file_actions.len()))]
@@ -240,7 +248,7 @@ where
     let semaphore = Arc::new(tokio::sync::Semaphore::new(10)); // Limit concurrency
     let mut join_set = tokio::task::JoinSet::new();
 
-    for action in file_actions {
+    for action in file_actions.into_iter().filter(is_actionable) {
         let client = client.clone();
         let sync_uuid = *sync_uuid;
         let sync_path = sync_path.clone();
@@ -298,8 +306,18 @@ where
     .await
     .map_err(|e| HarmonicError::SendError(e.to_string()))?;
 
-    let mut file_path = PathBuf::from(&action.path);
+    let mut file_path = from_protocol_path(&action.path);
     let abs_file_path = sync_path.join(&file_path);
+
+    if action.direction == TransferDirection::Delete as i32 {
+        debug!("Delete mode: removing local copy of {:?}", abs_file_path);
+        delete_sync_file(&file_path, &CONFIG).await?;
+        tx.send(SyncRequest {
+            payload: Some(harmonic::proto::sync_request::Payload::Complete(true)),
+        })
+        .await
+        .map_err(|e| HarmonicError::SendError(e.to_string()))?;
+    }
 
     if action.direction == TransferDirection::Download as i32 {
         let mut sink =
@@ -483,6 +501,20 @@ fn start_scheduler(config: &sync::Config) -> Instrumented<JoinHandle<()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_actionable() {
+        let mk_action = |direction: TransferDirection| FileAction {
+            path: String::from("file.txt"),
+            direction: direction as i32,
+            timestamp_latest_modified: None,
+        };
+
+        assert!(is_actionable(&mk_action(TransferDirection::Upload)));
+        assert!(is_actionable(&mk_action(TransferDirection::Download)));
+        assert!(is_actionable(&mk_action(TransferDirection::Delete)));
+        assert!(!is_actionable(&mk_action(TransferDirection::Skip)));
+    }
 
     #[test]
     fn test_calculate_change_score() {

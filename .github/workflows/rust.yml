@@ -71,6 +71,10 @@ jobs:
       if: matrix.target == 'aarch64-unknown-linux-gnu'
       run: cross build --release --target ${{ matrix.target }}
 
+    - name: Run tests
+      if: matrix.target != 'aarch64-unknown-linux-gnu'
+      run: cargo test --target ${{ matrix.target }}
+
     - name: Rename binaries (Windows)
       if: matrix.target == 'x86_64-pc-windows-msvc'
       run: |

@@ -42,6 +42,7 @@ async fn test_client_upload_full_flow() {
             hash: meta.hash.to_vec(),
             timestamp: Some(meta.modified_ts),
             file_type: harmonic::proto::FileType::Other as i32,
+            change_type: harmonic::proto::ChangeType::Added as i32,
         }
     }).collect();
 
