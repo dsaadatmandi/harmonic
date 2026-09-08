@@ -230,6 +230,48 @@ fn is_actionable(action: &FileAction) -> bool {
     action.direction != TransferDirection::Skip as i32
 }
 
+/// Runs the file actions of a sync plan in parallel, bounded by a semaphore.
+/// Every file is attempted even if one fails and the combined result fails so
+/// the caller does not persist state for a partially transferred sync
+async fn execute_file_transfers<F, Fut>(file_actions: Vec<FileAction>, transfer: F) -> Result<()>
+where
+    F: Fn(FileAction) -> Fut,
+    Fut: std::future::Future<Output = Result<()>> + Send + 'static,
+{
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(10)); // Limit concurrency
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for action in file_actions.into_iter().filter(is_actionable) {
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
+
+        let task = transfer(action);
+        join_set.spawn(async move {
+            let _permit = permit;
+            task.await
+        });
+    }
+
+    let mut failure: Option<anyhow::Error> = None;
+    while let Some(res) = join_set.join_next().await {
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                error!("Failed to sync file: {:#}", e);
+                failure.get_or_insert(e);
+            }
+            Err(e) => {
+                error!("Task join error: {:?}", e);
+                failure.get_or_insert(anyhow::anyhow!("File transfer task failed: {:?}", e));
+            }
+        }
+    }
+
+    match failure {
+        Some(e) => Err(e.context("One or more file transfers failed")),
+        None => Ok(()),
+    }
+}
+
 #[instrument(skip(client, file_actions, sync_path), fields(sync_uuid = %sync_uuid, action_count = file_actions.len()))]
 async fn send_data_to_server<T: Debug>(
     client: HarmonicClient<T>,
@@ -245,30 +287,13 @@ where
         Into<Box<dyn std::error::Error + Send + Sync>> + Send,
     <T as tonic::client::GrpcService<tonic::body::Body>>::Future: Send,
 {
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(10)); // Limit concurrency
-    let mut join_set = tokio::task::JoinSet::new();
-
-    for action in file_actions.into_iter().filter(is_actionable) {
+    execute_file_transfers(file_actions, move |action| {
         let client = client.clone();
-        let sync_uuid = *sync_uuid;
         let sync_path = sync_path.clone();
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-
-        join_set.spawn(async move {
-            let _permit = permit;
-            if let Err(e) = sync_file(client, action, sync_uuid, sync_path).await {
-                error!("Failed to sync file: {:?}", e);
-            }
-        });
-    }
-
-    while let Some(res) = join_set.join_next().await {
-        if let Err(e) = res {
-            error!("Task join error: {:?}", e);
-        }
-    }
-
-    Ok(())
+        let sync_uuid = *sync_uuid;
+        async move { sync_file(client, action, sync_uuid, sync_path).await }
+    })
+    .await
 }
 
 #[instrument(skip(client, sync_path), fields(sync_uuid = %sync_uuid, action))]
@@ -501,6 +526,87 @@ fn start_scheduler(config: &sync::Config) -> Instrumented<JoinHandle<()>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn mk_transfer_action(name: &str) -> FileAction {
+        FileAction {
+            path: String::from(name),
+            direction: TransferDirection::Upload as i32,
+            timestamp_latest_modified: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_file_transfers_succeeds_when_all_files_succeed() {
+        let actions = vec![
+            mk_transfer_action("a.txt"),
+            mk_transfer_action("b.txt"),
+        ];
+
+        let result = execute_file_transfers(actions, |_| async move {
+            Ok(())
+        })
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_file_transfers_fails_when_any_file_fails() {
+        // Scenario: one file transfer fails while others succeed
+        // Expected: the whole transfer reports failure so the sync state is
+        // not persisted, matching save_state_on_success semantics
+        let actions = vec![
+            mk_transfer_action("a.txt"),
+            mk_transfer_action("b.txt"),
+            mk_transfer_action("c.txt"),
+        ];
+
+        let result = execute_file_transfers(actions, |action| async move {
+            if action.path == "b.txt" {
+                Err(anyhow::anyhow!("transfer failed"))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+
+        assert!(result.is_err(), "one failed file must fail the whole transfer");
+    }
+
+    #[tokio::test]
+    async fn test_execute_file_transfers_attempts_all_files_despite_failure() {
+        // Scenario: a transfer fails part way through the sync plan
+        // Expected: remaining files are still attempted
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_in_task = attempts.clone();
+
+        let actions = vec![
+            mk_transfer_action("a.txt"),
+            mk_transfer_action("b.txt"),
+            mk_transfer_action("c.txt"),
+        ];
+
+        let result = execute_file_transfers(actions, move |action| {
+            let attempts = attempts_in_task.clone();
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                if action.path == "a.txt" {
+                    Err(anyhow::anyhow!("transfer failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "all files must be attempted despite one failing"
+        );
+    }
 
     #[test]
     fn test_is_actionable() {

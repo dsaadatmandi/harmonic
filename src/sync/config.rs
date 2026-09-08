@@ -62,6 +62,17 @@ pub fn config_dir_path() -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Creates the config directory if it does not exist yet and returns its path
+pub fn ensure_config_dir() -> Result<PathBuf> {
+    let path = config_dir_path()?;
+
+    fs::DirBuilder::new()
+        .recursive(true)
+        .create(&path)?;
+
+    Ok(path)
+}
+
 fn config_file_path() -> Result<PathBuf> {
     let mut path = config_dir_path()?;
     path.push("config.toml");
@@ -73,9 +84,7 @@ fn save_config(config: Config) -> Result<()> {
     let config_toml = toml::to_string(&config)?;
 
     debug!("Writing config file to {:?}", config_file_path());
-    fs::DirBuilder::new()
-        .recursive(true)
-        .create(config_dir_path()?)?;
+    ensure_config_dir()?;
 
     fs::write(config_file_path()?, config_toml)?;
 

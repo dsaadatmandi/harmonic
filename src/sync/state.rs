@@ -129,13 +129,6 @@ fn state_file_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn state_dir_path() -> Result<PathBuf> {
-    let mut path = PathBuf::from(".");
-    path.push(".harmonic");
-
-    Ok(path)
-}
-
 fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf> {
     absolute_path
         .strip_prefix(sync_path)
@@ -149,9 +142,7 @@ fn get_relative_path(absolute_path: &Path, sync_path: &Path) -> Result<PathBuf> 
 pub fn save_state(state: SyncState) -> Result<()> {
     let state_json = serde_json::to_string(&state)?;
 
-    fs::DirBuilder::new()
-        .recursive(true)
-        .create(state_dir_path()?)?;
+    crate::sync::config::ensure_config_dir()?;
 
     fs::write(state_file_path()?, state_json)?;
 
@@ -194,19 +185,26 @@ pub fn generate_state(root_path: &PathBuf, ignore_hidden: bool) -> Result<SyncSt
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.metadata().map(|m| m.is_file()).unwrap_or(false))
-        .filter(|p| if ignore_hidden {!has_hidden_components(p.path())} else {true})
     {
         let absolute_path = file.path();
-        debug!(?absolute_path, "Getting metadata for path");
-        let metadata = FileMetadata::new(absolute_path);
-
         let relative_path = get_relative_path(absolute_path, root_path)?;
+
+        // hidden files are filtered on the path relative to the sync root so
+        // a root that itself sits under a hidden directory still syncs
+        if ignore_hidden && has_hidden_components(&relative_path) {
+            debug!(?relative_path, "Skipping hidden file");
+            continue;
+        }
+
+        debug!(?absolute_path, "Getting metadata for path");
+        let metadata = FileMetadata::new(absolute_path)?;
+
         debug!(
             ?relative_path,
             ?absolute_path,
             "Inserted metadata for absolute path with relative path key"
         );
-        file_tree.insert(relative_path, metadata?);
+        file_tree.insert(relative_path, metadata);
     }
 
     Ok(SyncState {
@@ -1089,6 +1087,45 @@ mod tests {
         assert!(persisted.tree.contains_key(&PathBuf::from("file.txt")));
 
         std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_generate_state_ignores_hidden_dirs_inside_root() {
+        // Scenario: sync root contains a visible file and a file inside a
+        // hidden directory. Expected: only the visible file is tracked
+        let dir = tempdir().unwrap();
+        let root = PathBuf::from(dir.path());
+
+        fs::write(root.join("visible.txt"), "data").unwrap();
+        let hidden_dir = root.join(".hidden");
+        fs::create_dir(&hidden_dir).unwrap();
+        fs::write(hidden_dir.join("secret.txt"), "data").unwrap();
+
+        let state = generate_state(&root, true).unwrap();
+
+        assert_eq!(state.tree.len(), 1);
+        assert!(state.tree.contains_key(&PathBuf::from("visible.txt")));
+    }
+
+    #[test]
+    fn test_generate_state_finds_files_under_hidden_root_path() {
+        // Scenario: the sync root itself sits under a hidden directory, e.g.
+        // a tempdir or ~/.config/app/data. Hidden filtering must apply to the
+        // tree contents relative to the root, not to the root's own absolute
+        // path. Expected: the file is tracked
+        let outer = tempdir().unwrap();
+        let root = outer.path().join("syncroot");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("file.txt"), "data").unwrap();
+
+        let state = generate_state(&root, true).unwrap();
+
+        assert_eq!(
+            state.tree.len(),
+            1,
+            "files must be tracked even when the root path contains hidden components"
+        );
+        assert!(state.tree.contains_key(&PathBuf::from("file.txt")));
     }
 
     #[test]

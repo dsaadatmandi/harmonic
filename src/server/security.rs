@@ -5,12 +5,12 @@ use tonic::transport::{Identity, ServerTlsConfig};
 
 use crate::{
     Config,
-    sync::config::config_dir_path,
+    sync::config::ensure_config_dir,
     utils::{HarmonicError, Result},
 };
 
 pub fn get_identity(config: &Config) -> Result<(Identity, bool)> {
-    let config_dir = config_dir_path().unwrap_or(config.sync_path.join(".harmonic"));
+    let config_dir = ensure_config_dir()?;
     let cert_path = config_dir.join("certificate.crt");
     let private_key_path = config_dir.join("certificate.pk");
 
@@ -38,6 +38,6 @@ pub fn get_identity(config: &Config) -> Result<(Identity, bool)> {
 }
 
 pub fn get_server_tls_config(config: &Config) -> Result<(ServerTlsConfig, bool)> {
-    let (identity, was_generated) = get_identity(&config)?;
+    let (identity, was_generated) = get_identity(config)?;
     Ok((ServerTlsConfig::new().identity(identity), was_generated))
 }
