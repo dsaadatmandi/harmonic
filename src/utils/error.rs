@@ -36,6 +36,9 @@ pub enum HarmonicError {
     #[error("Invalid input parameters")]
     InvalidInputError,
 
+    #[error("Input error: {0}")]
+    Input(String),
+
     #[error("gRPC send error: {0}")]
     SendError(String),
 

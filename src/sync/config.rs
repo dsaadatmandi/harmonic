@@ -114,27 +114,8 @@ pub fn load_config() -> Result<Config> {
 }
 
 fn handle_no_config() -> Result<Config> {
-    let mut path = String::new();
-    let mut address = String::new();
     println!("No config found! Creating new file...");
-    println!("Please enter the path you would like to Harmonize:");
-    io::stdin()
-        .read_line(&mut path)
-        .expect("Failed to read input for path");
-
-    // how about this just depends on which binary will be compiled
-    println!(
-        "Please enter the address your server should listen on / your client should connect to:"
-    );
-    println!("Valid formats include: IP:PORT and [::1]:PORT");
-    println!("The generated certificate will be valid for this address and the server's local IP");
-    io::stdin()
-        .read_line(&mut address)
-        .expect("Failed to read input for address");
-
-    let mut c = Config::default();
-    c.sync_path = PathBuf::from(path.trim());
-    c.socket_addr = address.trim().to_string();
+    let c = config_from_input(&mut io::stdin().lock())?;
 
     println!("Saving config to: {:?}", config_dir_path());
     println!("Please review the config file to find additional configurable properties");
@@ -143,14 +124,69 @@ fn handle_no_config() -> Result<Config> {
     Ok(c)
 }
 
+fn config_from_input<R: io::BufRead>(input: &mut R) -> Result<Config> {
+    let path = read_input_line(input, "Please enter the path you would like to Harmonize:")?;
+
+    // how about this just depends on which binary will be compiled
+    let address = read_input_line(input, "Please enter the address your server should listen on / your client should connect to: Valid formats include: IP:PORT and [::1]:PORT. The generated certificate will be valid for this address and the server's local IP")?;
+
+    let mut c = Config::default();
+    c.sync_path = PathBuf::from(path);
+    c.socket_addr = address;
+
+    Ok(c)
+}
+
+fn read_input_line<R: io::BufRead>(input: &mut R, prompt: &str) -> Result<String> {
+    println!("{prompt}");
+    let mut buf = String::new();
+    let read = input.read_line(&mut buf).map_err(HarmonicError::Io)?;
+
+    if read == 0 {
+        // stdin closed before an answer arrived, e.g. a headless launcher
+        return Err(HarmonicError::Input(String::from(
+            "input closed before configuration was completed, create a config file manually",
+        )));
+    }
+
+    Ok(buf.trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_config_dir_path() {
         let path = config_dir_path().unwrap();
         assert!(path.ends_with(".harmonic"));
+    }
+
+    #[test]
+    fn test_config_from_input_reads_both_answers() {
+        let mut input = Cursor::new("/storage/emulated/0/Books\n192.168.1.10:42069\n");
+
+        let config = config_from_input(&mut input).unwrap();
+
+        assert_eq!(config.sync_path, PathBuf::from("/storage/emulated/0/Books"));
+        assert_eq!(config.socket_addr, "192.168.1.10:42069");
+    }
+
+    #[test]
+    fn test_config_from_input_fails_on_closed_input() {
+        let mut input = Cursor::new("");
+
+        let result = config_from_input(&mut input);
+
+        assert!(result.is_err(), "closed input must fail instead of an empty config");
+    }
+
+    #[test]
+    fn test_config_from_input_fails_on_closed_input_after_first_answer() {
+        let mut input = Cursor::new("/storage/emulated/0/Books\n");
+
+        assert!(config_from_input(&mut input).is_err());
     }
 
     #[test]

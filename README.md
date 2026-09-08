@@ -106,6 +106,11 @@ Harmonic uses BuzHash, a pure Rust custom implementation of a rolling hash algor
 
 ## How to Run
 
+### Boox Go 10.3 (Termux, manual sync on launch)
+
+Run the client on Android via Termux with widget shortcuts for bootstrap and
+one-shot syncs. See [scripts/termux/README.md](scripts/termux/README.md).
+
 ### Configuration
 
 - 1. Download the applicable binary from release page

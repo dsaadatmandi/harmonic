@@ -33,7 +33,7 @@ pub fn load_cert() -> Result<Certificate> {
 }
 
 pub async fn bootstrap_from_server(server_address: &String) -> Result<Certificate> {
-    let otp = get_user_input_for_otp();
+    let otp = get_user_input_for_otp()?;
 
     let channel = Channel::from_shared(format_bootstrap_address(
         server_address,
@@ -104,26 +104,60 @@ fn format_bootstrap_address(server_address: &String, port: u16) -> Result<String
     Ok(format!("http://{}", addr))
 }
 
-fn get_user_input_for_otp() -> String {
-    let mut buf = String::new();
+fn get_user_input_for_otp() -> Result<String> {
+    read_otp(&mut io::stdin().lock())
+}
+
+fn read_otp<R: io::BufRead>(input: &mut R) -> Result<String> {
     println!("First time setup");
 
     loop {
-        buf.clear();
         println!("Enter OTP from server to download certificate for TLS connection: ");
 
-        if io::stdin().read_line(&mut buf).is_err() {
-            println!(
-                "Error reading from stdin. Try again but this may be an unrecoverable failure."
-            );
-            continue;
-        };
+        let mut buf = String::new();
+        let read = input.read_line(&mut buf).map_err(HarmonicError::Io)?;
 
-        match buf.trim().len() == 64 {
-            true => return buf.trim().to_string(),
-            false => {
-                continue;
-            }
+        if read == 0 {
+            // stdin closed without an otp, e.g. a headless launcher
+            return Err(HarmonicError::Input(String::from(
+                "input closed before an otp was provided",
+            )));
         }
+
+        let trimmed = buf.trim();
+        if trimmed.len() == 64 {
+            return Ok(trimmed.to_string());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_read_otp_accepts_64_characters() {
+        let otp = "a".repeat(64);
+        let mut input = Cursor::new(format!("{otp}\n"));
+
+        assert_eq!(read_otp(&mut input).unwrap(), otp);
+    }
+
+    #[test]
+    fn test_read_otp_retries_on_invalid_length() {
+        let otp = "b".repeat(64);
+        let mut input = Cursor::new(format!("tooshort\n{otp}\n"));
+
+        assert_eq!(read_otp(&mut input).unwrap(), otp);
+    }
+
+    #[test]
+    fn test_read_otp_fails_on_closed_input() {
+        let mut input = Cursor::new("");
+
+        let result = read_otp(&mut input);
+
+        assert!(result.is_err(), "closed input must fail instead of looping forever");
     }
 }

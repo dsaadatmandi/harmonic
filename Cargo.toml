@@ -56,13 +56,18 @@ path-clean = "1.0.1"
 filetime = "0.2.26"
 prost-types = "0.14.1"
 rcgen = "0.14.5"
-rustls = { version = "0.23.35", features = ["ring"] }
+rustls = { version = "0.23.35", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 rand = "0.9.2"
 http = "1.4.0"
 dirs = "6.0.0"
 proptest = "1.9.0"
 local-ip-address = "0.6.8"
 clap = { version = "4.5", features = ["derive"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# zstd-sys defaults build x86-64 assembly and require libclang for bindings,
+# neither of which exist on aarch64 cross builds
+zstd-sys = { version = "2.0.13", default-features = false, features = ["legacy", "zdict_builder", "no_asm"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"
