@@ -345,9 +345,19 @@ pub fn generate_sync_plan(
             .map(|r| FileChangeType::try_from(r.change_type).unwrap_or(FileChangeType::Added));
 
         let direction: TransferDirection = match (local, remote) {
-            (Some(_), Some(_)) if remote_change == Some(FileChangeType::Removed) => {
-                debug!(?path, "File deleted on client (remote), propagating deletion to server (local)");
-                TransferDirection::Delete
+            (Some(local_file), Some(remote_file))
+                if remote_change == Some(FileChangeType::Removed) =>
+            {
+                // keep newer: a modification newer than the deleted content
+                // survives, otherwise the deletion propagates
+                let deleted_ts = remote_file.timestamp.unwrap_or_default();
+                if proto_timestamp_gt(local_file.modified_ts, deleted_ts) {
+                    latest_timestamp = local_file.modified_ts;
+                    TransferDirection::Download
+                } else {
+                    debug!(?path, "File deleted on client (remote), propagating deletion to server (local)");
+                    TransferDirection::Delete
+                }
             }
             (Some(local_file), Some(remote_file)) if remote_file.hash != local_file.hash => {
                 let remote_file_timestamp = remote_file.timestamp.unwrap_or_default();
@@ -754,6 +764,106 @@ mod tests {
             TransferDirection::Delete as i32,
             "Client deletion must propagate as Delete, not Download"
         );
+    }
+
+    #[test]
+    fn test_generate_sync_plan_server_newer_change_survives_client_deletion() {
+        // server modified the file after the version the client deleted
+        let mut local_tree = BTreeMap::new();
+        local_tree.insert(
+            PathBuf::from("conflict.txt"),
+            FileMetadata {
+                hash: [2; 32],
+                modified_ts: Timestamp { seconds: 2000, nanos: 0 },
+            },
+        );
+
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 2000,
+            tree: local_tree,
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("conflict.txt"),
+            timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: FileChangeType::Removed as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].direction,
+            TransferDirection::Download as i32,
+            "a modification newer than the deleted content must survive"
+        );
+    }
+
+    #[test]
+    fn test_generate_sync_plan_client_deletion_survives_server_older_copy() {
+        // the client deleted a newer version than the one the server holds
+        let mut local_tree = BTreeMap::new();
+        local_tree.insert(
+            PathBuf::from("conflict.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
+            },
+        );
+
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: local_tree,
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("conflict.txt"),
+            timestamp: Some(Timestamp { seconds: 2000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![2; 32],
+            change_type: FileChangeType::Removed as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].direction,
+            TransferDirection::Delete as i32,
+            "a deletion newer than the server copy must propagate"
+        );
+    }
+
+    #[test]
+    fn test_generate_sync_plan_equal_timestamps_deletion_wins() {
+        let mut local_tree = BTreeMap::new();
+        local_tree.insert(
+            PathBuf::from("conflict.txt"),
+            FileMetadata {
+                hash: [1; 32],
+                modified_ts: Timestamp { seconds: 1000, nanos: 0 },
+            },
+        );
+
+        let state_now = SyncState {
+            last_sync_timestamp_micros: 1000,
+            tree: local_tree,
+        };
+
+        let remote_files = vec![FileStatus {
+            path: String::from("conflict.txt"),
+            timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
+            file_type: FileType::Other.into(),
+            hash: vec![1; 32],
+            change_type: FileChangeType::Removed as i32,
+        }];
+
+        let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
+
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].direction, TransferDirection::Delete as i32);
     }
 
     #[test]

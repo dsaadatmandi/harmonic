@@ -4,8 +4,9 @@
 // 1. Client computes its full status list including REMOVED entries and
 //    UNCHANGED entries via build_status_list
 // 2. Server generates the sync plan, a file reported REMOVED by the client
-//    becomes a Delete action, a file missing on the server that the client
-//    reports UNCHANGED also becomes a Delete action
+//    becomes a Delete action unless the surviving copy is newer, a file
+//    missing on the server that the client reports UNCHANGED also becomes a
+//    Delete action
 // 3. The client executing the plan deletes its local copy (no-op if already
 //    deleted) and sends the FileAction through the stream
 // 4. The side receiving the FileAction deletes its own copy (no-op if gone)
@@ -17,6 +18,7 @@ use harmonic::sync::handler::{delete_sync_file, handle_sync_payload};
 use harmonic::sync::*;
 use std::{fs, path::PathBuf};
 use tempfile::tempdir;
+use filetime::FileTime;
 use futures::SinkExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::PollSender;
@@ -45,8 +47,13 @@ async fn test_client_deletion_propagates_to_server() {
     let server_root = PathBuf::from(server_dir.path());
 
     let content = b"shared content";
-    fs::write(client_root.join("gone.txt"), content).unwrap();
+    let client_file = client_root.join("gone.txt");
+    fs::write(&client_file, content).unwrap();
     fs::write(server_root.join("gone.txt"), content).unwrap();
+
+    // the deleted content is newer than the server copy, real mtimes are not
+    // reliable for ordering across two separate writes
+    filetime::set_file_mtime(&client_file, FileTime::from_unix_time(2_000_000_000, 0)).unwrap();
 
     let client_before = generate_state(&client_root, false).unwrap();
     fs::remove_file(client_root.join("gone.txt")).unwrap();

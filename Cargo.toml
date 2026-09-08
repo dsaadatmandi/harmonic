@@ -26,7 +26,7 @@ tonic = { version = "0.14.2", features = ["tls-ring", "zstd"] }
 prost = "0.14.1"
 tonic-prost = "0.14.2"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "sync", "fs"]} 
-tokio-stream = "0.1.17"
+tokio-stream = { version = "0.1.17", features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 chrono = "0.4.42"
 notify = "8.2.0"
