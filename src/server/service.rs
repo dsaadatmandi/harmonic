@@ -23,12 +23,17 @@ use crate::sync::handler::{handle_sync_payload, SyncStatus};
 use crate::sync::{self, Config, SyncState};
 use crate::utils::HarmonicError;
 
+// a session that has not opened a stream is only kept alive for this long,
+// this bounds sessions from sync runs that transferred nothing (all skips)
+const IDLE_SESSION_TTL_MICROS: i64 = 300 * 1_000_000;
+
 #[derive(Clone, Debug)]
 pub struct SessionData {
     // allow for resume in future
     pub timestamp_micros: i64,
     pub local_state: SyncState,
     pub sync_plan: Vec<FileAction>,
+    pub active_streams: usize,
 }
 
 #[derive(Debug)]
@@ -64,19 +69,25 @@ impl Harmonic for HarmonicService {
         let sync_plan = sync::generate_sync_plan(&state_now, &files_list)
             .map_err(|e| Status::internal(format!("Unable to generate sync plan: {}", e)))?;
 
-        self.sync_sessions.lock().await.insert(
-            Uuid::from_str(&sync_uuid).map_err(|e| {
-                Status::invalid_argument(format!(
-                    "Did not receive valid uuid from client. Conversion failed: {}",
-                    e
-                ))
-            })?,
-            SessionData {
-                timestamp_micros: chrono::Utc::now().timestamp_micros(),
-                local_state: state_now,
-                sync_plan: sync_plan.clone(),
-            },
-        );
+        {
+            let mut sessions = self.sync_sessions.lock().await;
+            evict_idle_sessions(&mut sessions, chrono::Utc::now().timestamp_micros());
+
+            sessions.insert(
+                Uuid::from_str(&sync_uuid).map_err(|e| {
+                    Status::invalid_argument(format!(
+                        "Did not receive valid uuid from client. Conversion failed: {}",
+                        e
+                    ))
+                })?,
+                SessionData {
+                    timestamp_micros: chrono::Utc::now().timestamp_micros(),
+                    local_state: state_now,
+                    sync_plan: sync_plan.clone(),
+                    active_streams: 0,
+                },
+            );
+        }
 
         let response_strategy = ServerSyncStateResponse {
             sync_uuid,
@@ -102,13 +113,15 @@ impl Harmonic for HarmonicService {
 
         tracing::Span::current().record("session_uuid", tracing::field::display(&session_uuid));
 
-        // check session
-        let _session = self
-            .sync_sessions
-            .lock()
-            .await
-            .get(&session_uuid)
-            .ok_or_else(|| Status::not_found("Session not found"))?;
+        // a sync run transfers its files over separate streams sharing this
+        // session, so the session must stay alive until the last one finishes
+        {
+            let mut sessions = self.sync_sessions.lock().await;
+            let session = sessions
+                .get_mut(&session_uuid)
+                .ok_or_else(|| Status::not_found("Session not found"))?;
+            session.active_streams += 1;
+        }
 
         let request_stream = request.into_inner();
         let (tx, rx) = mpsc::channel::<Result<SyncRequest, Status>>(256);
@@ -140,11 +153,21 @@ async fn handle_sync_request_stream(
 ) -> Result<JoinHandle<Result<()>>> {
     let handle = tokio::spawn(
         async move {
+            // held open so the response stream only ends after the session
+            // bookkeeping below has run
+            let keepalive_tx = tx.clone();
+
             let result = route_sync_request_stream(stream, tx, config).await;
 
-            // a session is only valid for a single transfer, release it once
-            // the stream is done so completed sessions do not accumulate
-            sync_sessions.lock().await.remove(&session_uuid);
+            {
+                let mut sessions = sync_sessions.lock().await;
+                if let Some(session) = sessions.get_mut(&session_uuid) {
+                    session.active_streams -= 1;
+                    if session.active_streams == 0 {
+                        sessions.remove(&session_uuid);
+                    }
+                }
+            }
 
             if result.is_ok() {
                 // wait for flushing to complete. maybe this can be made asynchronous
@@ -153,12 +176,20 @@ async fn handle_sync_request_stream(
                 info!("Sync request stream completed successfully");
             }
 
+            drop(keepalive_tx);
             result
         }
         .instrument(Span::current()),
     );
 
     Ok(handle)
+}
+
+fn evict_idle_sessions(sessions: &mut HashMap<Uuid, SessionData>, now_micros: i64) {
+    sessions.retain(|_, session| {
+        session.active_streams > 0
+            || now_micros - session.timestamp_micros < IDLE_SESSION_TTL_MICROS
+    });
 }
 
 async fn route_sync_request_stream(
@@ -214,4 +245,67 @@ async fn route_sync_request_stream(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn session_with(active_streams: usize, age_micros: i64, now_micros: i64) -> SessionData {
+        SessionData {
+            timestamp_micros: now_micros - age_micros,
+            local_state: SyncState {
+                last_sync_timestamp_micros: 0,
+                tree: BTreeMap::new(),
+            },
+            sync_plan: vec![],
+            active_streams,
+        }
+    }
+
+    #[test]
+    fn test_evict_idle_sessions_removes_expired_sessions_without_streams() {
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        sessions.insert(Uuid::new_v4(), session_with(0, IDLE_SESSION_TTL_MICROS, now));
+        sessions.insert(
+            Uuid::new_v4(),
+            session_with(0, IDLE_SESSION_TTL_MICROS + 1, now),
+        );
+
+        evict_idle_sessions(&mut sessions, now);
+
+        assert!(
+            sessions.is_empty(),
+            "idle sessions past the ttl must be evicted"
+        );
+    }
+
+    #[test]
+    fn test_evict_idle_sessions_keeps_sessions_with_active_streams() {
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        // expired by age but still transferring
+        sessions.insert(Uuid::new_v4(), session_with(1, IDLE_SESSION_TTL_MICROS + 1, now));
+
+        evict_idle_sessions(&mut sessions, now);
+
+        assert_eq!(
+            sessions.len(),
+            1,
+            "sessions with in flight streams must never be evicted"
+        );
+    }
+
+    #[test]
+    fn test_evict_idle_sessions_keeps_recent_sessions() {
+        let now = 10_000_000;
+        let mut sessions = HashMap::new();
+        sessions.insert(Uuid::new_v4(), session_with(0, IDLE_SESSION_TTL_MICROS - 1, now));
+
+        evict_idle_sessions(&mut sessions, now);
+
+        assert_eq!(sessions.len(), 1, "recent sessions must be kept");
+    }
 }
