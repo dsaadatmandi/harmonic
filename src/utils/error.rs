@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 use tonic::transport;
-use walkdir::DirEntry;
 use http::uri::InvalidUri;
 
 #[derive(Error, Debug)]
@@ -31,14 +30,8 @@ pub enum HarmonicError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("String conversion error: path contains invalid UTF-8 characters")]
-    StringInvalid,
-
     #[error("System Time Error: {0}")]
     SystemTime(#[from] std::time::SystemTimeError),
-
-    #[error("File metadata error: Unable to get metadata for {dir:?}")]
-    FileMetadataError { dir: DirEntry },
 
     #[error("Invalid input parameters")]
     InvalidInputError,

@@ -19,7 +19,7 @@ enum FileType {
   PDF = 2;
 }
 
-enum ChangeType {
+enum FileChangeType {
   // ADDED is the zero value so legacy clients that do not populate
   // change_type are treated as uploading new content rather than deleting
   ADDED = 0;
@@ -47,7 +47,7 @@ message FileStatus {
   google.protobuf.Timestamp timestamp = 2;
   FileType file_type = 3;
   bytes hash = 4;
-  ChangeType change_type = 5;
+  FileChangeType change_type = 5;
 }
 
 message ServerSyncStateResponse {

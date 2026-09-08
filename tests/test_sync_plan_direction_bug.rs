@@ -5,7 +5,7 @@
 // - Download: Server → Client
 
 use harmonic::sync::*;
-use harmonic::proto::{ChangeType, FileStatus, FileType, TransferDirection};
+use harmonic::proto::{FileChangeType, FileStatus, FileType, TransferDirection};
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -26,7 +26,7 @@ fn test_sync_plan_new_file_on_client() {
         hash: vec![1, 2, 3],
         timestamp: Some(prost_types::Timestamp::default()),
         file_type: FileType::Other as i32,
-        change_type: ChangeType::Added as i32,
+        change_type: FileChangeType::Added as i32,
     };
     let client_files = vec![client_file];
 
@@ -97,7 +97,7 @@ fn test_sync_plan_client_file_newer() {
         hash: vec![1, 2, 3], // Different hash
         timestamp: Some(new_timestamp),
         file_type: FileType::Other as i32,
-        change_type: ChangeType::Modified as i32,
+        change_type: FileChangeType::Modified as i32,
     };
     let client_files = vec![client_file];
 
@@ -140,7 +140,7 @@ fn test_sync_plan_server_file_newer() {
         hash: vec![4, 5, 6], // Different hash
         timestamp: Some(old_timestamp),
         file_type: FileType::Other as i32,
-        change_type: ChangeType::Modified as i32,
+        change_type: FileChangeType::Modified as i32,
     };
     let client_files = vec![client_file];
 

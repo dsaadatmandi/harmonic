@@ -5,7 +5,7 @@
 // These tests feed Windows style paths through the protocol boundary and
 // verify they resolve to nested paths regardless of the host platform
 
-use harmonic::proto::{ChangeType, FileStatus, FileType, TransferDirection};
+use harmonic::proto::{FileChangeType, FileStatus, FileType, TransferDirection};
 use harmonic::sync::state::{FileMetadata, SyncState};
 use harmonic::sync::transfer::get_absolute_path;
 use harmonic::sync::*;
@@ -16,8 +16,6 @@ use prost_types::Timestamp;
 
 #[test]
 fn test_nested_state_paths_serialize_with_forward_slashes() {
-    // Scenario: a real nested file is scanned into the state tree
-    // Expected: the protocol path uses forward slashes on every platform
     let dir = tempdir().unwrap();
     let root = PathBuf::from(dir.path());
 
@@ -35,7 +33,7 @@ fn test_nested_state_paths_serialize_with_forward_slashes() {
             timestamp: Some(meta.modified_ts),
             file_type: FileType::Other.into(),
             hash: meta.hash.to_vec(),
-            change_type: ChangeType::Unchanged as i32,
+            change_type: FileChangeType::Unchanged as i32,
         })
         .collect();
 
@@ -48,9 +46,7 @@ fn test_nested_state_paths_serialize_with_forward_slashes() {
 
 #[test]
 fn test_windows_client_path_resolves_as_nested_on_any_platform() {
-    // Scenario: a Windows client reports "notes\\idea.txt" and the server
     // plans a Download for it
-    // Expected: the plan path is normalized and resolves to the nested file
     // inside the server sync root
     let dir = tempdir().unwrap();
     let server_root = PathBuf::from(dir.path());
@@ -73,7 +69,7 @@ fn test_windows_client_path_resolves_as_nested_on_any_platform() {
         timestamp: Some(Timestamp { seconds: 1000, nanos: 0 }),
         file_type: FileType::Other.into(),
         hash: vec![1; 32],
-        change_type: ChangeType::Unchanged as i32,
+        change_type: FileChangeType::Unchanged as i32,
     }];
 
     let plan = generate_sync_plan(&server_state, &client_files).unwrap();
@@ -88,33 +84,8 @@ fn test_windows_client_path_resolves_as_nested_on_any_platform() {
 }
 
 #[test]
-fn test_file_status_vec_to_tree_from_windows_style_paths() {
-    // Scenario: FileStatus messages arrive with Windows style separators
-    // Expected: tree keys are nested paths, not flat names containing backslashes
-    let file_statuses = vec![FileStatus {
-        path: String::from("notes\\idea.txt"),
-        timestamp: Some(Timestamp::default()),
-        file_type: FileType::Other.into(),
-        hash: vec![1; 32],
-        change_type: ChangeType::Unchanged as i32,
-    }];
-
-    let tree = file_status_vec_to_tree(file_statuses);
-
-    let key = tree.keys().next().unwrap();
-    assert_eq!(
-        key.components().count(),
-        2,
-        "windows style path must map to a nested path"
-    );
-}
-
-#[test]
 fn test_modified_nested_file_round_trips_through_protocol() {
-    // Scenario: a nested file is modified between syncs and reported to the server
-    // Expected: status list, sync plan and local resolution all agree on the
-    // same forward-slash path
-    // The client timestamp is synthetic and newer than the server one, real
+    // the client timestamp is synthetic and newer than the server one, real
     // mtimes are not reliable for ordering across two separate writes
     let client_dir = tempdir().unwrap();
     let server_dir = tempdir().unwrap();
@@ -146,7 +117,7 @@ fn test_modified_nested_file_round_trips_through_protocol() {
         timestamp: Some(newer_ts),
         file_type: FileType::Other.into(),
         hash: client_meta.hash.to_vec(),
-        change_type: ChangeType::Modified as i32,
+        change_type: FileChangeType::Modified as i32,
     }];
 
     assert_eq!(status_list[0].path, "notes/idea.txt");

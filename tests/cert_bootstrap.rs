@@ -17,15 +17,10 @@ fn test_certificates_are_written_without_existing_config_dir() {
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
 
-    // Scenario: a client bootstraps its first server certificate
-    // Expected: the config directory is created on demand and the cert saved
     let saved = save_cert(b"test-certificate-pem");
     assert!(saved.is_ok(), "save_cert must create the config directory: {saved:?}");
     assert!(dir.path().join(".harmonic/server.crt").exists());
 
-    // Scenario: a server generates its first identity
-    // Expected: certificate and key are written into a freshly created
-    // config directory
     let config = Config {
         sync_path: PathBuf::from(dir.path()),
         socket_addr: String::from("127.0.0.1:42069"),

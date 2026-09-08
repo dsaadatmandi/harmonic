@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use harmonic::proto::{ChangeType, FileAction, FileStatus};
+use harmonic::proto::{FileAction, FileChangeType, FileStatus};
 use harmonic::sync::handler::{SyncStatus, delete_sync_file, handle_sync_payload};
 use harmonic::utils::HarmonicError;
 use harmonic::utils::tracing::{send_trace, tracing_orchestrator};
@@ -154,13 +154,12 @@ async fn run_sync() -> Result<()> {
     let last_state = sync::load_state().context("Unable to load previous state")?;
     let now_state =
         sync::generate_state(&CONFIG.sync_path, true).context("Failed to generate state")?;
-    let status_list = sync::build_status_list(&last_state, &now_state)
-        .context("Failed to build client status list")?;
+    let status_list = sync::build_status_list(&last_state, &now_state);
 
     // wont check with server which is not ideal
     let change_count = status_list
         .iter()
-        .filter(|s| s.change_type != ChangeType::Unchanged as i32)
+        .filter(|s| s.change_type != FileChangeType::Unchanged as i32)
         .count();
     if change_count == 0 {
         info!("No updates to push");
@@ -189,9 +188,13 @@ async fn run_sync() -> Result<()> {
         error!("Sync failed due to: {:?}", e);
     }
 
-    // only persist the new state when the transfer succeeded, otherwise files
-    // would be recorded as synced although they were not transferred
-    sync::save_state_on_success(&result, now_state).context("Failed to save state")?;
+    // the state is only persisted after a successful transfer, a partial sync
+    // must be retried on the next run
+    result?;
+
+    info!("Completed Sync");
+
+    sync::save_state(now_state).context("Failed to save state")?;
 
     Ok(())
 }
@@ -553,9 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_file_transfers_fails_when_any_file_fails() {
-        // Scenario: one file transfer fails while others succeed
-        // Expected: the whole transfer reports failure so the sync state is
-        // not persisted, matching save_state_on_success semantics
+        // not persisted, the failed sync is retried on the next run
         let actions = vec![
             mk_transfer_action("a.txt"),
             mk_transfer_action("b.txt"),
@@ -576,8 +577,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_file_transfers_attempts_all_files_despite_failure() {
-        // Scenario: a transfer fails part way through the sync plan
-        // Expected: remaining files are still attempted
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_in_task = attempts.clone();
 

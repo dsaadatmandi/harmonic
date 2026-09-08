@@ -62,7 +62,6 @@ pub fn config_dir_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Creates the config directory if it does not exist yet and returns its path
 pub fn ensure_config_dir() -> Result<PathBuf> {
     let path = config_dir_path()?;
 

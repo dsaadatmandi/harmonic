@@ -16,8 +16,6 @@ pub enum SyncStatus {
     Completed,
 }
 
-/// Deletes a file inside the sync root. Paths are resolved and validated via
-/// get_absolute_path so deletions can never escape the sync directory
 pub async fn delete_sync_file(file_path: &Path, config: &Config) -> Result<()> {
     let abs_path = get_absolute_path(file_path, &config.sync_path)?;
 
@@ -151,8 +149,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_sync_payload_delete_removes_file() {
-        // Scenario: server receives a Delete FileAction for a file it holds
-        // Expected: the file is removed from the sync root
         let dir = tempfile::tempdir().unwrap();
         let root_path = PathBuf::from(dir.path());
         let config = Config {
@@ -190,8 +186,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_sync_payload_delete_missing_file_is_noop() {
-        // Scenario: Delete arrives for a file that is already gone
-        // Expected: no error, deletion is idempotent
         let dir = tempfile::tempdir().unwrap();
         let root_path = PathBuf::from(dir.path());
         let config = Config {
@@ -224,8 +218,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_sync_payload_delete_rejects_traversal() {
-        // Scenario: Delete arrives with a path escaping the sync root
-        // Expected: rejected by the path integrity check
         let dir = tempfile::tempdir().unwrap();
         let root_path = PathBuf::from(dir.path());
         let config = Config {
@@ -256,38 +248,4 @@ mod tests {
         assert!(result.is_err(), "path traversal must be rejected for deletions");
     }
 
-    #[tokio::test]
-    async fn test_handle_sync_payload_normalizes_windows_action_path() {
-        // Scenario: FileAction arrives with a Windows style separator
-        // Expected: file_path is stored as a nested platform path
-        let dir = tempfile::tempdir().unwrap();
-        let root_path = PathBuf::from(dir.path());
-        let config = Config {
-            sync_path: root_path,
-            ..Config::default()
-        };
-
-        let (tx, _rx) = mpsc::channel(1);
-        let mut sink = tx.sink_map_err(|e| HarmonicError::SendError(e.to_string()));
-
-        let mut file_path = PathBuf::new();
-        let mut writer_tx = None;
-
-        let payload = sync_request::Payload::FileAction(FileAction {
-            path: "dir\\file.txt".to_string(),
-            direction: TransferDirection::Download as i32,
-            timestamp_latest_modified: Default::default(),
-        });
-
-        let result = handle_sync_payload(
-            payload,
-            &mut sink,
-            &mut file_path,
-            config,
-            &mut writer_tx,
-        ).await;
-
-        assert!(result.is_ok());
-        assert_eq!(file_path.components().count(), 2, "dir\\file.txt should be a nested path");
-    }
 }

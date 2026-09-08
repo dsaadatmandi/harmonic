@@ -2,8 +2,8 @@
 // This test simulates the full client->server upload flow
 
 use harmonic::sync::*;
-use harmonic::proto::{sync_request, FileAction, TransferDirection, Delta};
-use harmonic::sync::handler::{handle_sync_payload, SyncStatus};
+use harmonic::proto::{sync_request, TransferDirection};
+use harmonic::sync::handler::handle_sync_payload;
 use harmonic::utils::HarmonicError;
 use std::fs;
 use std::path::PathBuf;
@@ -42,7 +42,7 @@ async fn test_client_upload_full_flow() {
             hash: meta.hash.to_vec(),
             timestamp: Some(meta.modified_ts),
             file_type: harmonic::proto::FileType::Other as i32,
-            change_type: harmonic::proto::ChangeType::Added as i32,
+            change_type: harmonic::proto::FileChangeType::Added as i32,
         }
     }).collect();
 

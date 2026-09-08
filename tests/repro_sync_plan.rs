@@ -1,4 +1,4 @@
-use harmonic::proto::{ChangeType, FileStatus, FileType, TransferDirection};
+use harmonic::proto::{FileChangeType, FileStatus, FileType, TransferDirection};
 use harmonic::sync::state::{FileMetadata, SyncState, generate_sync_plan};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ fn test_sync_plan_direction() {
         }),
         file_type: FileType::Other.into(),
         hash: vec![2; 32],
-        change_type: ChangeType::Modified as i32,
+        change_type: FileChangeType::Modified as i32,
     }];
 
     let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
@@ -80,7 +80,7 @@ fn test_generate_sync_plan_local_newer() {
         }),
         file_type: FileType::Other.into(),
         hash: vec![2; 32],
-        change_type: ChangeType::Modified as i32,
+        change_type: FileChangeType::Modified as i32,
     }];
 
     let plan = generate_sync_plan(&state_now, &remote_files).unwrap();
@@ -120,7 +120,7 @@ fn test_generate_sync_plan_remote_newer() {
         }),
         file_type: FileType::Other.into(),
         hash: vec![2; 32],
-        change_type: ChangeType::Modified as i32,
+        change_type: FileChangeType::Modified as i32,
     }];
 
     let plan = generate_sync_plan(&state_now, &remote_files).unwrap();

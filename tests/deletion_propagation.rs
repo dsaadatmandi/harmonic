@@ -12,7 +12,7 @@
 //
 // Delete is idempotent on both sides so both copies always converge to deleted
 
-use harmonic::proto::{ChangeType, FileAction, FileStatus, FileType, TransferDirection};
+use harmonic::proto::{FileChangeType, FileAction, FileStatus, FileType, TransferDirection};
 use harmonic::sync::handler::{delete_sync_file, handle_sync_payload};
 use harmonic::sync::*;
 use std::{fs, path::PathBuf};
@@ -33,14 +33,12 @@ fn unchanged_status(path: &str, hash: [u8; 32], seconds: i64) -> FileStatus {
         }),
         file_type: FileType::Other.into(),
         hash: hash.to_vec(),
-        change_type: ChangeType::Unchanged as i32,
+        change_type: FileChangeType::Unchanged as i32,
     }
 }
 
 #[tokio::test]
 async fn test_client_deletion_propagates_to_server() {
-    // Scenario: both sides have synced versions of a file, the client deletes it
-    // Expected: the plan deletes the file on the server instead of re-downloading
     let client_dir = tempdir().unwrap();
     let server_dir = tempdir().unwrap();
     let client_root = PathBuf::from(client_dir.path());
@@ -55,13 +53,13 @@ async fn test_client_deletion_propagates_to_server() {
     let client_after = generate_state(&client_root, false).unwrap();
     let server_state = generate_state(&server_root, false).unwrap();
 
-    let status_list = build_status_list(&client_before, &client_after).unwrap();
+    let status_list = build_status_list(&client_before, &client_after);
     assert_eq!(
         status_list.len(),
         1,
         "the deleted file must appear in the status list"
     );
-    assert_eq!(status_list[0].change_type, ChangeType::Removed as i32);
+    assert_eq!(status_list[0].change_type, FileChangeType::Removed as i32);
 
     let sync_plan = generate_sync_plan(&server_state, &status_list).unwrap();
 
@@ -102,8 +100,6 @@ async fn test_client_deletion_propagates_to_server() {
 
 #[tokio::test]
 async fn test_server_deletion_propagates_to_client() {
-    // Scenario: both sides have synced versions of a file, the server deletes it
-    // Expected: the plan deletes the file on the client instead of re-uploading
     let client_dir = tempdir().unwrap();
     let server_dir = tempdir().unwrap();
     let client_root = PathBuf::from(client_dir.path());
@@ -118,13 +114,13 @@ async fn test_server_deletion_propagates_to_client() {
     let client_after = generate_state(&client_root, false).unwrap();
     let server_state = generate_state(&server_root, false).unwrap();
 
-    let status_list = build_status_list(&client_before, &client_after).unwrap();
+    let status_list = build_status_list(&client_before, &client_after);
     assert_eq!(
         status_list.len(),
         1,
         "unchanged file must be reported as UNCHANGED"
     );
-    assert_eq!(status_list[0].change_type, ChangeType::Unchanged as i32);
+    assert_eq!(status_list[0].change_type, FileChangeType::Unchanged as i32);
 
     let sync_plan = generate_sync_plan(&server_state, &status_list).unwrap();
 
@@ -148,8 +144,6 @@ async fn test_server_deletion_propagates_to_client() {
 
 #[tokio::test]
 async fn test_deletion_of_file_missing_on_both_sides_is_noop() {
-    // Scenario: file was deleted on both sides, REMOVED status still arrives
-    // Expected: Delete action that completes without touching either side
     let client_dir = tempdir().unwrap();
     let server_dir = tempdir().unwrap();
     let client_root = PathBuf::from(client_dir.path());
@@ -161,7 +155,7 @@ async fn test_deletion_of_file_missing_on_both_sides_is_noop() {
     let client_after = generate_state(&client_root, false).unwrap();
     let server_state = generate_state(&server_root, false).unwrap();
 
-    let status_list = build_status_list(&client_before, &client_after).unwrap();
+    let status_list = build_status_list(&client_before, &client_after);
     let sync_plan = generate_sync_plan(&server_state, &status_list).unwrap();
 
     assert_eq!(sync_plan.len(), 1);
@@ -190,8 +184,6 @@ async fn test_deletion_of_file_missing_on_both_sides_is_noop() {
 
 #[tokio::test]
 async fn test_unmodified_files_are_not_replanned() {
-    // Scenario: both sides are fully in sync
-    // Expected: every action in the plan is Skip so the client transfers nothing
     let client_dir = tempdir().unwrap();
     let server_dir = tempdir().unwrap();
     let client_root = PathBuf::from(client_dir.path());
@@ -211,7 +203,7 @@ async fn test_unmodified_files_are_not_replanned() {
             timestamp: Some(meta.modified_ts),
             file_type: FileType::Other.into(),
             hash: meta.hash.to_vec(),
-            change_type: ChangeType::Unchanged as i32,
+            change_type: FileChangeType::Unchanged as i32,
         })
         .collect();
 
@@ -227,8 +219,6 @@ async fn test_unmodified_files_are_not_replanned() {
 
 #[test]
 fn test_unchanged_and_removed_in_one_status_list() {
-    // Scenario: client keeps one file and deletes another between syncs
-    // Expected: status list contains the kept file as UNCHANGED and the
     // deleted file as REMOVED with its previous metadata
     let dir = tempdir().unwrap();
     let root = PathBuf::from(dir.path());
@@ -243,22 +233,20 @@ fn test_unchanged_and_removed_in_one_status_list() {
     fs::remove_file(root.join("gone.txt")).unwrap();
     let now_state = generate_state(&root, false).unwrap();
 
-    let status_list = build_status_list(&before_state, &now_state).unwrap();
+    let status_list = build_status_list(&before_state, &now_state);
 
     assert_eq!(status_list.len(), 2);
 
     let keep = status_list.iter().find(|s| s.path == "keep.txt").unwrap();
-    assert_eq!(keep.change_type, ChangeType::Unchanged as i32);
+    assert_eq!(keep.change_type, FileChangeType::Unchanged as i32);
 
     let gone = status_list.iter().find(|s| s.path == "gone.txt").unwrap();
-    assert_eq!(gone.change_type, ChangeType::Removed as i32);
+    assert_eq!(gone.change_type, FileChangeType::Removed as i32);
     assert_eq!(gone.timestamp, Some(old_ts), "removed entry carries previous metadata");
 }
 
 #[test]
 fn test_server_deletion_planned_for_unchanged_client_file() {
-    // Scenario: server deleted a file the client still reports as UNCHANGED
-    // Expected: Delete action planned by generate_sync_plan
     let dir = tempdir().unwrap();
     let server_root = PathBuf::from(dir.path());
 

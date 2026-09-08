@@ -53,8 +53,6 @@ pub async fn bootstrap_from_server(server_address: &String) -> Result<Certificat
     save_cert(&pem_bytes)
 }
 
-/// Persists a server certificate into the config directory, creating the
-/// directory on demand so a first bootstrap cannot fail on a missing dir
 pub fn save_cert(pem_bytes: &[u8]) -> Result<Certificate> {
     ensure_config_dir()?;
     fs::write(get_cert_path(), pem_bytes)?;
