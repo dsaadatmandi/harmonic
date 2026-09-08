@@ -11,5 +11,7 @@ pre-build = [
     "apt-get update && apt-get install -y wget unzip",
     "wget -q https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-x86_64.zip -O /tmp/protoc.zip",
     "unzip -q /tmp/protoc.zip -d /usr/local",
-    "chmod +x /usr/local/bin/protoc"
+    "chmod +x /usr/local/bin/protoc",
+    # NDK in this image has no libunwind; rustc passes -lunwind. libgcc.a ships the unwinder.
+    "D=/android-ndk/lib/gcc/aarch64-linux-android/4.9.x; mkdir -p $D; [ -f $D/libunwind.a ] || cp $D/libgcc.a $D/libunwind.a 2>/dev/null || printf '!<arch>\n' > $D/libunwind.a"
 ]
