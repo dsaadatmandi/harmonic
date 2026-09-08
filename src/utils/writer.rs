@@ -33,6 +33,9 @@ pub async fn delta_writer(
         let path_for_error = path_clone.clone();
 
         let result = async {
+            if let Some(parent) = tmp_file.parent() {
+                fs::create_dir_all(parent).await?;
+            }
             let mut file = File::create(&tmp_file).await?;
             let mut delta_count = 0;
 
